@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TickHub-CN 数据网关</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1d2430; --muted: #5b6675; --line: #d8dee8; --accent: #0b63c5; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg: #e6eaf0; --muted: #9aa6b5; --line: #33404f; --accent: #6fb0ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; color: var(--fg); }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 24px; margin: 0 0 4px; }
+    p.lead { margin: 0 0 24px; color: var(--muted); }
+    form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+    input, select, button { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--fg); }
+    input { width: 150px; }
+    button { color: #fff; background: var(--accent); border-color: var(--accent); cursor: pointer; }
+    button[disabled] { opacity: .55; cursor: progress; }
+    .note { margin: 18px 0; padding: 12px 14px; border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 14px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 22px 0 12px; font-size: 13px; color: var(--muted); }
+    .meta code { color: var(--fg); }
+    .error { color: #b42318; white-space: pre-wrap; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-weight: 600; color: var(--muted); }
+    td { font-variant-numeric: tabular-nums; }
+    pre { overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+    footer { margin-top: 32px; font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>TickHub-CN 数据网关</h1>
+  <p class="lead">只读示例：浏览器通过普通 HTTP 访问固定白名单接口，返回与 MCP 工具相同的 envelope。</p>
+
+  <div class="note">
+    MCP Streamable HTTP 是 JSON-RPC 协议（<code>/mcp</code>），不是 REST，页面不能直接
+    <code>fetch('/mcp')</code>。本页调用的是 <code>web/gateway.py</code> 暴露的只读适配接口；
+    或者改用 MCP SDK 客户端。
+  </div>
+
+  <form id="query">
+    <label>查询
+      <select id="tool">
+        <option value="quote">实时行情 quote</option>
+        <option value="profile">公司概况 profile</option>
+        <option value="kline">日/周/月 K 线 kline</option>
+        <option value="crosscheck">财报勾稽 crosscheck</option>
+        <option value="announcements">公告 announcements</option>
+        <option value="valuation">估值 valuation</option>
+      </select>
+    </label>
+    <label>股票代码
+      <input id="code" value="600000" inputmode="numeric" maxlength="9" required />
+    </label>
+    <button id="run" type="submit">查询</button>
+  </form>
+
+  <div class="meta" id="meta" hidden></div>
+  <div id="status" aria-live="polite"></div>
+  <div id="error" class="error"></div>
+  <div id="result"></div>
+
+  <footer>
+    数据来源与置信度见 envelope 的 <code>meta.source</code> / <code>meta.confidence</code>；
+    <code>meta.trace_id</code> 可用于回放本次调用。本页面不构成投资建议。
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function endpoint(tool, code) {
+  const q = new URLSearchParams({ code });
+  if (tool === "quote") return `/api/quote?codes=${encodeURIComponent(code)}`;
+  if (tool === "kline") { q.set("period", "daily"); q.set("limit", "20"); return `/api/kline?${q}`; }
+  if (tool === "announcements") { q.set("limit", "10"); return `/api/announcements?${q}`; }
+  return `/api/${tool}?${q}`;
+}
+
+function table(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "<p>没有记录。</p>";
+  const keys = [];
+  for (const row of rows) for (const key of Object.keys(row)) if (!keys.includes(key)) keys.push(key);
+  const head = keys.map((k) => `<th>${escape(k)}</th>`).join("");
+  const body = rows.slice(0, 200).map((row) =>
+    `<tr>${keys.map((k) => `<td>${escape(row[k])}</td>`).join("")}</tr>`).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function escape(value) {
+  if (value === null || value === undefined) return "<span style='opacity:.6'>null</span>";
+  if (typeof value === "object") return escape(JSON.stringify(value));
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+function render(payload) {
+  const meta = payload.meta || {};
+  const box = $("meta");
+  box.hidden = false;
+  box.innerHTML = ["source", "confidence", "cache_hit", "fetched_at", "trace_id"]
+    .filter((k) => meta[k] !== undefined)
+    .map((k) => `${escape(k)}: <code>${escape(meta[k])}</code>`)
+    .join("");
+
+  const data = payload.data;
+  if (Array.isArray(data)) { $("result").innerHTML = table(data); return; }
+  if (data && typeof data === "object") {
+    const listKey = Object.keys(data).find((k) => Array.isArray(data[k]) && data[k].length && typeof data[k][0] === "object");
+    if (listKey) {
+      $("result").innerHTML = `<h3>${escape(listKey)} (${data[listKey].length})</h3>` + table(data[listKey]);
+      return;
+    }
+  }
+  $("result").innerHTML = `<pre>${escape(JSON.stringify(data, null, 2))}</pre>`;
+}
+
+async function run(tool, code) {
+  $("run").disabled = true;
+  $("status").textContent = "查询中…";
+  $("error").textContent = "";
+  $("result").innerHTML = "";
+  $("meta").hidden = true;
+  try {
+    const response = await fetch(endpoint(tool, code), { headers: { Accept: "application/json" } });
+    const payload = await response.json();
+    if (!payload.ok) {
+      $("error").textContent = `${payload.error.code}: ${payload.error.message}`;
+    } else {
+      render(payload);
+    }
+    $("status").textContent = `HTTP ${response.status}`;
+  } catch (exc) {
+    $("error").textContent = String(exc);
+    $("status").textContent = "请求失败";
+  } finally {
+    $("run").disabled = false;
+  }
+}
+
+$("query").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const code = $("code").value.trim();
+  if (code) run($("tool").value, code);
+});
+</script>
+</body>
+</html>

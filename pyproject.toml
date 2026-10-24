@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tickhub-cn"
+version = "0.1.0"
+description = "TickHub-CN: A-share data MCP server, CLI and local import library"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [{ name = "QuotaFuse" }]
+keywords = ["a-share", "mcp", "stock", "market-data", "tickhub"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "mcp>=1.9",
+  "requests>=2.31",
+  "typer>=0.12",
+  "toml>=0.10",
+  "python-dotenv>=1.0",
+  "redis>=5.0",
+  "apscheduler>=3.10",
+  "tenacity>=8.2",
+  "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+crawl = ["crawl4ai>=0.4"]
+admin = ["fastapi>=0.110", "uvicorn>=0.27"]
+db = ["sqlalchemy>=2.0", "pymysql>=1.1", "psycopg2-binary>=2.9"]
+sources = ["akshare>=1.12", "baostock>=0.8", "xlrd>=2.0", "openpyxl>=3.1", "pandas>=2.0"]
+# mootdx pins httpx<0.26 and tenacity<9, which breaks a2a-sdk/litellm in a shared
+# venv; nothing in tickhub_cn imports it, so it ships as an opt-in extra only.
+sources-legacy = ["mootdx>=0.11"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+all = ["tickhub-cn[crawl,admin,db,sources]"]
+docx = ["python-docx>=1.1"]
+
+[project.scripts]
+th-cn = "tickhub_cn.cli.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+markers = [
+  "live: tests that touch the public internet",
+  "contract: MCP API contract tests",
+  "slow: crawler, daemon and supervisor tests",
+]

@@ -1,0 +1,30 @@
+# TickHub-CN external field map.
+#
+# Applied to every tool response after the data source has been normalised:
+#   1. keys listed in [defaults].hide (or a tool's own hide) are dropped;
+#   2. keys are renamed through the tool's alias table;
+#   3. if default_fields is non-empty, only those keys remain. A selection
+#      matches either the source name or the alias, and keys starting with "_"
+#      are always kept for provenance.
+#
+# Precedence: per-call fields= argument > TICKHUB_FIELDS_<TOOL> env >
+# [tools.<name>].default_fields > full payload.
+#
+# A missing file is not an error: the full payload is returned unchanged.
+
+[defaults]
+hide = []
+
+# ---------------------------------------------------------------------------
+# Example: keep quote payloads small and rename two fields.
+#
+# [tools.tencent_quote]
+# default_fields = ["code", "name", "price", "change_pct"]
+# alias = { change_pct = "pct_chg", prev_close = "pre_close" }
+# hide = ["limit_up", "limit_down"]
+#
+# Example: default projection for financial statements.
+#
+# [tools.eastmoney_financial_report]
+# default_fields = ["code", "report_date", "statement", "revenue", "net_profit"]
+# ---------------------------------------------------------------------------

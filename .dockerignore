@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.egg-info
+build
+dist
+var
+logs
+.env
+.pytest_cache
+tests
+docs
+skills
+*.json
+!proxy_pool.json

@@ -1,0 +1,19 @@
+# Optional multi-model gateway.
+#
+# TickHub-CN NEVER routes prices, financials or any other numeric value through
+# a model. The gateway exists only for auxiliary text work (announcement
+# cleaning, summarisation) and is disabled by default.
+#
+# environment variables override every key:
+#   MODEL_GATEWAY_ENABLE / MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY
+#   MODEL_GATEWAY_DEFAULT_MODEL
+
+[model_gateway]
+enable = false
+base_url = ""
+api_key = ""
+default_model = ""
+
+# Optional per-task routing. Any task not listed uses default_model.
+[model_gateway.routing]
+# text_clean = "gpt-4o-mini"

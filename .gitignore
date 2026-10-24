@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state
+logs/
+var/
+*.sqlite3
+
+# Reference checkout (external repo, kept local for comparison only)
+.reference-a-stock-data/
+
+# Scratch
+_pdl/
+.piptest/
+_p*.log

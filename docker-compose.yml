@@ -1,0 +1,57 @@
+# TickHub-CN: one container, one published port.
+#
+#   docker compose up -d
+#   curl -s http://127.0.0.1:8000/mcp -H 'Accept: application/json, text/event-stream'
+#
+# The MCP endpoint is JSON-RPC (Streamable HTTP), not REST. Redis is optional:
+# remove the redis service and the REDIS_URL override to run with the built-in
+# in-process cache (doctor will report "degraded" with QFSD-2001).
+
+services:
+  tickhub-cn:
+    build: .
+    image: tickhub-cn:0.1.0
+    command: ["start-all", "--host", "0.0.0.0", "--port", "8000", "--crawler", "on"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      RUN_MODE: http
+      LOG_LEVEL: info
+      REDIS_URL: redis://redis:6379/0
+      OFFLINE_CRAWLER_ENABLE: "true"
+      OFFLINE_CRAWLER_CRON: "0 2 * * *"
+      ARCHIVE_DIR: /app/var/archive
+      ARCHIVE_DB_PATH: /app/var/archive/tickhub.db
+    volumes:
+      - tickhub-var:/app/var
+      - ./field_map.toml:/app/field_map.toml:ro
+      - ./config:/app/config:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import socket
+          socket.create_connection(("127.0.0.1", 8000), timeout=2).close()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  tickhub-var:

@@ -1,0 +1,15 @@
+# Admin Console settings.
+#
+# The Admin Console is a SEPARATE process (th-cn admin serve). It is off by
+# default, binds to loopback, and never exposes data-source secrets.
+# An explicit ADMIN_* environment variable always overrides the value here.
+
+[admin]
+enable = false
+host = "127.0.0.1"
+port = 8787
+auth_token = ""
+readonly = false
+cors_origins = ""
+audit_sink = "file"
+sensitive_mask = true

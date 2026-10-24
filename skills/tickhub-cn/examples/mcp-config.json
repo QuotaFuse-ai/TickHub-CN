@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "tickhub-cn": {
+      "command": "th-cn",
+      "args": ["mcp", "stdio"],
+      "env": {
+        "LOG_LEVEL": "warning",
+        "LOG_SINK": "stderr"
+      }
+    },
+    "tickhub-cn-http": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
