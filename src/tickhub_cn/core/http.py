@@ -123,20 +123,39 @@ class HealthRegistry:
 HEALTH = HealthRegistry()
 
 
-def _proxy_for(source: str) -> dict[str, str] | None:
+def _proxy_for(source: str) -> tuple[dict[str, str] | None, Any | None]:
+    """Return ``(proxies, node)``; ``node`` is set only when the pool supplied it."""
     settings = get_settings()
     try:
         from ..proxy.pool import get_pool
 
         pool = get_pool()
-        proxy = pool.acquire()
-        if proxy:
-            return proxy.as_requests_proxy()
+        node = pool.acquire()
+        if node:
+            return node.as_requests_proxy(), node
     except Exception:
         pass
     if settings.proxy_url:
-        return {"http": settings.proxy_url, "https": settings.proxy_url}
-    return None
+        return {"http": settings.proxy_url, "https": settings.proxy_url}, None
+    return None, None
+
+
+# Only transport-level failures implicate the proxy. An HTTP status, however
+# unhappy, proves the request travelled through the tunnel.
+PROXY_FAULTS = (
+    requests.exceptions.ProxyError,
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.SSLError,
+)
+
+
+def _mark_node(node: Any, ok: bool, latency_ms: float | None = None) -> None:
+    try:
+        from ..proxy.pool import get_pool
+
+        get_pool().mark(node, ok, latency_ms)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _session_for(source: str) -> requests.Session:
@@ -193,6 +212,7 @@ def fetch(
 
     for attempt in range(retries + 1):
         started = time.monotonic()
+        proxies, node = _proxy_for(source)
         try:
             resp = _session_for(source).request(
                 method.upper(),
@@ -201,11 +221,13 @@ def fetch(
                 data=data,
                 headers=headers,
                 timeout=timeout,
-                proxies=_proxy_for(source),
+                proxies=proxies,
                 allow_redirects=allow_redirects,
                 verify=verify,
             )
             latency = (time.monotonic() - started) * 1000
+            if node is not None:
+                _mark_node(node, True, latency)
             if resp.status_code in allow_status:
                 HEALTH.record(source, True, latency)
                 return resp
@@ -218,6 +240,8 @@ def fetch(
             latency = (time.monotonic() - started) * 1000
             last_err = exc
             HEALTH.record(source, False, latency, str(exc))
+            if node is not None and isinstance(exc, PROXY_FAULTS):
+                _mark_node(node, False)
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 4) + random.uniform(0, 0.3))
                 continue

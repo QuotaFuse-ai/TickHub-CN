@@ -65,10 +65,16 @@ class ProxyNode:
 
 
 class ProxyPool:
+    # A node is dropped only after this many consecutive connection-level
+    # failures; a single successful response resets the counter.
+    failure_threshold = 3
+
     def __init__(self, nodes: list[ProxyNode] | None = None) -> None:
         self.nodes: list[ProxyNode] = nodes or []
         self._idx = 0
         self._lock = threading.Lock()
+        self._monitor: threading.Thread | None = None
+        self._monitor_stop = threading.Event()
 
     @classmethod
     def from_settings(cls) -> "ProxyPool":
@@ -95,15 +101,26 @@ class ProxyPool:
         return None
 
     def mark(self, node: ProxyNode, ok: bool, latency_ms: float | None = None) -> None:
-        node.healthy = ok
-        node.latency_ms = latency_ms
-        node.last_checked = time.time()
-        if ok:
-            node.failures = 0
-        else:
-            node.failures += 1
-            if node.failures >= 3:
-                node.healthy = False
+        disabled = recovered = False
+        with self._lock:
+            node.latency_ms = latency_ms
+            node.last_checked = time.time()
+            if ok:
+                recovered = not node.healthy
+                node.failures = 0
+                node.healthy = True
+            else:
+                node.failures += 1
+                if node.failures >= self.failure_threshold and node.healthy:
+                    node.healthy = False
+                    disabled = True
+        if disabled:
+            get_logger("proxy").warning(
+                "proxy node disabled after consecutive failures",
+                extra={"error_code": "QFSD-5001", "detail": {"node": node.id, "failures": node.failures}},
+            )
+        elif recovered:
+            get_logger("proxy").info("proxy node recovered", extra={"detail": {"node": node.id}})
 
     def check(self, node: ProxyNode, timeout: int | None = None) -> bool:
         import requests
@@ -128,6 +145,46 @@ class ProxyPool:
         for node in self.nodes:
             self.check(node, timeout)
         return [n.masked() for n in self.nodes]
+
+    def start_monitor(self, interval: float | None = None) -> bool:
+        """Start the interval health checker. Returns False when already running."""
+        if not self.nodes:
+            return False
+        period = float(get_settings().proxy_pool_check_interval if interval is None else interval)
+        if period <= 0:
+            period = 60.0
+        with self._lock:
+            if self._monitor is not None and self._monitor.is_alive():
+                return False
+            self._monitor_stop.clear()
+            self._monitor = threading.Thread(
+                target=self._monitor_loop,
+                args=(period,),
+                name="proxy-pool-monitor",
+                daemon=True,
+            )
+            self._monitor.start()
+        return True
+
+    def _monitor_loop(self, period: float) -> None:
+        log = get_logger("proxy")
+        # Wait one full interval first: short-lived CLI processes that merely
+        # touch the pool never pay for a probe.
+        while not self._monitor_stop.wait(period):
+            checked = 0
+            for node in list(self.nodes):
+                if self._monitor_stop.is_set():
+                    return
+                self.check(node)
+                checked += 1
+            log.info("proxy pool checked", extra={"detail": {"nodes": checked}})
+
+    def stop_monitor(self, timeout: float = 2.0) -> None:
+        self._monitor_stop.set()
+        with self._lock:
+            monitor, self._monitor = self._monitor, None
+        if monitor is not None and monitor.is_alive() and monitor is not threading.current_thread():
+            monitor.join(timeout=timeout)
 
     def masked(self) -> list[dict[str, Any]]:
         return [n.masked() for n in self.nodes]
@@ -178,10 +235,15 @@ def get_pool() -> ProxyPool:
     with _LOCK:
         if _POOL is None:
             _POOL = ProxyPool.from_settings()
-        return _POOL
+        pool = _POOL
+    if pool.nodes:
+        pool.start_monitor()
+    return pool
 
 
 def reset_pool() -> None:
     global _POOL
     with _LOCK:
-        _POOL = None
+        old, _POOL = _POOL, None
+    if old is not None:
+        old.stop_monitor()

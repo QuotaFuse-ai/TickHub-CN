@@ -224,6 +224,12 @@ def start_all(
         if server is not None:
             server.should_exit = True
         thread.join(timeout=10)
+        try:
+            from ..proxy.pool import reset_pool
+
+            reset_pool()
+        except Exception:  # noqa: BLE001
+            pass
         log.info("start-all stopped", extra={"event": "startall_stopped"})
     return 0
 
