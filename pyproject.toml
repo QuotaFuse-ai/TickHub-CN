@@ -55,6 +55,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 tickhub_cn = ["data/*.pem"]
 
+# The console page is a single file outside the package; `th-cn admin serve`
+# resolves it from sys.prefix/share when it is not running from a checkout.
+[tool.setuptools.data-files]
+"share/tickhub-cn/web/admin" = ["web/admin/index.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

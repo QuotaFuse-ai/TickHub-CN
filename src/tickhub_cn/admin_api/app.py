@@ -9,17 +9,21 @@ anything non-loopback, every write audited, secrets masked.
 # FastAPI lazily, and stringified annotations would make ``request: Request``
 # unresolvable (FastAPI would then read it as a required query parameter).
 
+import json
 import os
 import sqlite3
+import sys
 import time
+from collections import deque
 from dataclasses import fields as dataclass_fields
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .. import __version__
 from ..cache.redis_cache import get_cache
 from ..core.config import SECRET_HINTS, Settings, get_settings
-from ..core.http import HEALTH
+from ..core.http import HEALTH, read_health_state
 from ..logging.setup import audit, get_logger
 from ..proxy.pool import get_pool, reset_pool
 
@@ -154,8 +158,7 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> Any:
-        web_dir = Path(admin.get("web_dir") or settings.admin_web_dir)
-        page = web_dir / "index.html"
+        page = resolve_web_dir(admin.get("web_dir") or settings.admin_web_dir) / "index.html"
         if page.exists():
             return FileResponse(page)
         return HTMLResponse(
@@ -296,8 +299,8 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
     @app.get("/api/logs")
     def logs(request: Request, limit: int = 100, level: str = "", q: str = "") -> dict[str, Any]:
         auth(request)
-        rows = _read_logs(settings, limit=limit, level=level, q=q)
-        return {"ok": True, "rows": rows, "source": settings.log_sink, "path": settings.log_file}
+        rows, origin = _read_logs(settings, limit=limit, level=level, q=q)
+        return {"ok": True, "rows": rows, "source": origin, "path": settings.log_file}
 
     # -------------------------------------------------------------- mcp debug
 
@@ -388,14 +391,47 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
     return app
 
 
-def _health_snapshot() -> dict[str, Any]:
-    merged: dict[str, Any] = dict(HEALTH.snapshot())
+def _checked_at(payload: dict[str, Any]) -> float:
+    raw = str(payload.get("last_checked_at") or "")
     try:
-        for source, payload in get_cache().read_health().items():
-            merged.setdefault(source, payload)
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _health_snapshot() -> dict[str, Any]:
+    """Merge health from disk (other processes), Redis and this process.
+
+    Three writers can cover the same source; the most recently checked wins so
+    a stale local counter never hides a fresh observation from the MCP server.
+    """
+    merged: dict[str, Any] = {}
+    sources = [read_health_state()]
+    try:
+        sources.append(get_cache().read_health())
     except Exception:
         pass
+    sources.append(HEALTH.snapshot())
+    for batch in sources:
+        for source, payload in batch.items():
+            current = merged.get(source)
+            if current is None or _checked_at(payload) >= _checked_at(current):
+                merged[source] = payload
     return merged
+
+
+def resolve_web_dir(configured: str | Path = "./web/admin") -> Path:
+    """Locate the console page in a checkout, an editable install or a wheel."""
+    p = Path(configured)
+    if (p / "index.html").exists():
+        return p
+    for candidate in (
+        Path(__file__).resolve().parents[3] / "web" / "admin",
+        Path(sys.prefix) / "share" / "tickhub-cn" / "web" / "admin",
+    ):
+        if (candidate / "index.html").exists():
+            return candidate
+    return p
 
 
 def _validate_fieldmap(content: str) -> dict[str, Any]:
@@ -437,10 +473,17 @@ def _preview_params(tool: str, code: str) -> dict[str, Any]:
     return params
 
 
-def _read_logs(settings: Settings, *, limit: int, level: str, q: str) -> list[dict[str, Any]]:
-    path = Path(settings.log_file + ".db")
-    if not path.exists():
-        return []
+def _read_logs(
+    settings: Settings, *, limit: int, level: str, q: str
+) -> tuple[list[dict[str, Any]], str]:
+    cap = max(1, min(int(limit), 500))
+    db = Path(settings.log_file + ".db")
+    if db.exists():
+        return _read_sqlite_logs(db, limit=cap, level=level, q=q), "sqlite"
+    return _read_jsonl_logs(Path(settings.log_file), limit=cap, level=level, q=q), "jsonl"
+
+
+def _read_sqlite_logs(path: Path, *, limit: int, level: str, q: str) -> list[dict[str, Any]]:
     sql = "SELECT ts, level, logger, message, payload FROM log_entry"
     clauses: list[str] = []
     params: list[Any] = []
@@ -453,7 +496,7 @@ def _read_logs(settings: Settings, *, limit: int, level: str, q: str) -> list[di
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY id DESC LIMIT ?"
-    params.append(max(1, min(int(limit), 500)))
+    params.append(limit)
     try:
         con = sqlite3.connect(path, timeout=3)
         con.row_factory = sqlite3.Row
@@ -466,9 +509,47 @@ def _read_logs(settings: Settings, *, limit: int, level: str, q: str) -> list[di
         return []
 
 
-def _read_audit(limit: int = 100) -> list[dict[str, Any]]:
-    import json
+def _read_jsonl_logs(path: Path, *, limit: int, level: str, q: str) -> list[dict[str, Any]]:
+    """Tail the JSON-lines file every sink mirrors to; newest first."""
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            tail = deque(fh, maxlen=max(limit * 4, 200))
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in reversed(tail):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if level and str(entry.get("level") or "").lower() != level.lower():
+            continue
+        message = str(entry.get("message") or "")
+        payload = json.dumps(entry, ensure_ascii=False)
+        if q and q not in message and q not in payload:
+            continue
+        rows.append(
+            {
+                "ts": entry.get("ts"),
+                "level": entry.get("level"),
+                "logger": entry.get("logger"),
+                "message": message,
+                "payload": payload,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
 
+
+def _read_audit(limit: int = 100) -> list[dict[str, Any]]:
     path = Path("./logs/admin_audit.jsonl")
     if not path.exists():
         return []
@@ -525,5 +606,6 @@ __all__ = [
     "effective_admin",
     "masked_settings",
     "read_admin_toml",
+    "resolve_web_dir",
     "serve",
 ]

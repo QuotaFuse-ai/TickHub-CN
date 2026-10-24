@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -89,11 +91,19 @@ def limiter_for(source: str) -> RateLimiter:
 
 
 class HealthRegistry:
-    """In-process source health snapshot, also mirrored into Redis by the cache layer."""
+    """Source health counters, mirrored to a file for the admin console.
 
-    def __init__(self) -> None:
+    The MCP server and the admin console are separate processes. Cache-backed
+    health only crosses that boundary when Redis is up, so the counters are
+    also written to ``HEALTH_STATE_PATH``; the console reads that file.
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
         self._lock = threading.Lock()
         self._state: dict[str, dict[str, Any]] = {}
+        self._path = Path(path) if path else None
+        self._dirty = False
+        self._flushed = 0.0
 
     def record(self, source: str, ok: bool, latency_ms: float, error: str | None = None) -> None:
         with self._lock:
@@ -110,6 +120,8 @@ class HealthRegistry:
             else:
                 cur["failures"] += 1
                 cur["last_error"] = error
+            self._dirty = True
+            self._flush_locked()
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -119,8 +131,51 @@ class HealthRegistry:
         with self._lock:
             return self._state.get(source, {}).get("ok", True)
 
+    def flush(self) -> None:
+        with self._lock:
+            self._flush_locked(force=True)
+
+    def _flush_locked(self, force: bool = False) -> None:
+        if not self._dirty:
+            return
+        now = time.monotonic()
+        if not force and now - self._flushed < 2.0:
+            return
+        path = self._path or Path(get_settings().health_state_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            payload = {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "sources": self._state}
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+            self._dirty = False
+            self._flushed = now
+        except OSError:
+            pass
+
 
 HEALTH = HealthRegistry()
+
+
+def read_health_state(path: str | Path | None = None, *, max_age_s: float = 86400) -> dict[str, dict[str, Any]]:
+    """Health counters written by another process, ignored once stale."""
+    p = Path(path) if path else Path(get_settings().health_state_path)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    sources = raw.get("sources")
+    if not isinstance(sources, dict):
+        return {}
+    updated = str(raw.get("updated_at") or "")
+    if updated and max_age_s > 0:
+        try:
+            written = time.mktime(time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S"))
+            if time.time() - written > max_age_s:
+                return {}
+        except ValueError:
+            pass
+    return {str(k): v for k, v in sources.items() if isinstance(v, dict)}
 
 
 def _proxy_for(source: str) -> tuple[dict[str, str] | None, Any | None]:

@@ -145,6 +145,11 @@ def setup_logging(settings: Settings | None = None, *, force: bool = False) -> N
     elif sink in ("mysql", "postgres"):
         streams.append(DatabaseHandler(s))
         streams.append(logging.StreamHandler(sys.stderr))
+    if sink != "file":
+        # The admin console reads this file; a sink that writes elsewhere
+        # (stderr, sqlite, mysql) would otherwise leave its log page empty.
+        Path(s.log_file).parent.mkdir(parents=True, exist_ok=True)
+        streams.append(logging.FileHandler(s.log_file, encoding="utf-8"))
     for h in streams:
         h.setFormatter(formatter)
         logger.addHandler(h)

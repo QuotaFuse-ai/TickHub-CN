@@ -47,6 +47,7 @@ class Settings:
     log_level: str = "info"
     log_sink: str = "stderr"
     log_file: str = "./logs/tickhub.log"
+    health_state_path: str = "./logs/source_health.json"
     redis_url: str = "redis://127.0.0.1:6379/0"
     proxy_url: str = ""
     tdx_path: str = ""
@@ -129,6 +130,7 @@ class Settings:
             log_level=g("LOG_LEVEL", "info").lower(),
             log_sink=g("LOG_SINK", "stderr").lower(),
             log_file=g("LOG_FILE", "./logs/tickhub.log"),
+            health_state_path=g("HEALTH_STATE_PATH", "./logs/source_health.json"),
             redis_url=g("REDIS_URL", "redis://127.0.0.1:6379/0"),
             proxy_url=g("PROXY_URL"),
             tdx_path=g("TDX_PATH"),

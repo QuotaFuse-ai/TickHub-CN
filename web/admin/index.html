@@ -17,20 +17,22 @@
             --soft: #1c242e; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg);
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+         background: var(--bg); color: var(--fg);
          font: 14px/1.55 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
   a { color: var(--accent); }
-  header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 12px;
+  header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 12px;
            align-items: center; justify-content: space-between; padding: 10px 20px;
            border-bottom: 1px solid var(--line); background: var(--bg); }
-  header h1 { margin: 0; font-size: 17px; }
+  header h1 { margin: 0; font-size: 17px; white-space: nowrap; }
   header .spacer { flex: 1; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
            border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   .badge.ok { color: var(--ok); border-color: var(--ok); }
   .badge.warn { color: var(--warn); border-color: var(--warn); }
   .badge.bad { color: var(--bad); border-color: var(--bad); }
-  .layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: calc(100vh - 53px); }
+  .layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); flex: 1;
+            align-items: start; min-height: 0; }
   nav { padding: 14px 10px; border-right: 1px solid var(--line); }
   nav a { display: block; padding: 7px 10px; border-radius: 7px; text-decoration: none;
           color: var(--fg); font-size: 13.5px; }
@@ -44,27 +46,33 @@
   .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
   .card .k { font-size: 12px; color: var(--muted); }
   .card .v { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 12px 0; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: flex-end; margin: 12px 0; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
   input, select, textarea, button { font: inherit; padding: 7px 9px; border: 1px solid var(--line);
           border-radius: 7px; background: transparent; color: var(--fg); }
+  input, select, button { height: 34px; }
+  select { padding-right: 22px; }
   textarea { width: 100%; min-height: 380px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
-  button { cursor: pointer; }
+  button { cursor: pointer; padding-inline: 14px; }
+  button:hover:not([disabled]) { border-color: var(--accent); }
+  button.primary:hover:not([disabled]) { filter: brightness(1.08); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.danger { color: var(--bad); border-color: var(--bad); }
   button[disabled] { opacity: .5; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; position: sticky; top: 53px; background: var(--bg); }
-  td { font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; background: var(--bg); white-space: nowrap; }
+  tbody tr:hover { background: var(--soft); }
+  td { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .scroll { overflow-x: auto; }
   pre { overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 8px;
         background: var(--soft); font-size: 12px; max-height: 460px; }
   .muted { color: var(--muted); }
   .err { color: var(--bad); white-space: pre-wrap; }
   .ok { color: var(--ok); }
-  #toast { position: fixed; right: 18px; bottom: 18px; max-width: 460px; padding: 10px 14px;
-           border: 1px solid var(--line); border-radius: 8px; background: var(--soft);
+  #toast { position: fixed; right: 18px; bottom: 18px; z-index: 30; max-width: min(460px, calc(100vw - 36px));
+           padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft);
            box-shadow: 0 6px 20px rgba(0,0,0,.18); display: none; white-space: pre-wrap; }
   .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
   details summary { cursor: pointer; color: var(--muted); }
@@ -76,6 +84,8 @@
     .layout { grid-template-columns: 1fr; }
     nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
     nav a { white-space: nowrap; }
+    main { padding: 16px 16px 48px; }
+    header { padding: 10px 14px; }
   }
 </style>
 </head>
@@ -85,9 +95,9 @@
   <span id="version" class="badge">未连接</span>
   <span id="ro" class="badge" hidden></span>
   <span class="spacer"></span>
-  <label style="flex-direction:row;align-items:center;gap:6px;">
+  <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
     管理令牌
-    <input id="token" type="password" autocomplete="off" placeholder="ADMIN_AUTH_TOKEN（本机可留空）" style="width:230px;" />
+    <input id="token" type="password" autocomplete="off" placeholder="ADMIN_AUTH_TOKEN（本机可留空）" style="width:min(230px,45vw);" />
   </label>
   <button id="connect" class="primary" type="button">连接</button>
 </header>
