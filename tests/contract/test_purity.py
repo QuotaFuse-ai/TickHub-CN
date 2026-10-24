@@ -65,5 +65,5 @@ def test_import_is_side_effect_free(repo_root: Path, tmp_path: Path) -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout.strip().splitlines()[-1]) == {"tools": 121, "aliases": 25}
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == {"tools": 124, "aliases": 25}
     assert {p.name for p in tmp_path.iterdir()} == before, "import wrote into the working directory"

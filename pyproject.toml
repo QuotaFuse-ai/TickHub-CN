@@ -35,7 +35,7 @@ admin = ["fastapi>=0.110", "uvicorn>=0.27"]
 db = ["sqlalchemy>=2.0", "pymysql>=1.1", "psycopg2-binary>=2.9"]
 sources = ["akshare>=1.12", "baostock>=0.8", "xlrd>=2.0", "openpyxl>=3.1", "pandas>=2.0"]
 # mootdx pins httpx<0.26 and tenacity<9, which breaks a2a-sdk/litellm in a shared
-# venv; nothing in tickhub_cn imports it, so it ships as an opt-in extra only.
+# venv; only stock_f10_tips imports it at call time, so it stays opt-in.
 sources-legacy = ["mootdx>=0.11"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 all = ["tickhub-cn[crawl,admin,db,sources]"]
@@ -49,6 +49,11 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The Shenwan host omits its TLS intermediate; sw_industry merges this vendored
+# certificate into certifi rather than disabling verification.
+[tool.setuptools.package-data]
+tickhub_cn = ["data/*.pem"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

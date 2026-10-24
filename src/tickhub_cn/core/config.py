@@ -107,7 +107,7 @@ class Settings:
     admin_cors_origins: str = ""
     admin_audit_sink: str = "file"
     admin_sensitive_mask: bool = True
-    admin_web_dir: str = "./web"
+    admin_web_dir: str = "./web/admin"
 
     # model gateway
     model_gateway_enable: bool = False
@@ -178,7 +178,7 @@ class Settings:
             admin_cors_origins=g("ADMIN_CORS_ORIGINS"),
             admin_audit_sink=g("ADMIN_AUDIT_SINK", "file"),
             admin_sensitive_mask=_bool(g("ADMIN_SENSITIVE_MASK"), True),
-            admin_web_dir=g("ADMIN_WEB_DIR", "./web"),
+            admin_web_dir=g("ADMIN_WEB_DIR", "./web/admin"),
             model_gateway_enable=_bool(g("MODEL_GATEWAY_ENABLE"), False),
             model_gateway_base_url=g("MODEL_GATEWAY_BASE_URL"),
             model_gateway_api_key=g("MODEL_GATEWAY_API_KEY"),

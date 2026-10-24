@@ -71,12 +71,12 @@ def test_version_flag_and_command_agree(run_cli) -> None:
     assert body["data"] == {"name": "tickhub-cn", "version": __version__}
 
 
-def test_tool_list_publishes_121_tools_and_25_aliases(run_cli_json) -> None:
+def test_tool_list_publishes_124_tools_and_25_aliases(run_cli_json) -> None:
     code, payload, _ = run_cli_json("tool", "list")
     assert code == 0
     names = {item["name"] for item in payload["data"]}
-    assert len(payload["data"]) == 146
-    assert payload["meta"]["registered"] == 121
+    assert len(payload["data"]) == 149
+    assert payload["meta"]["registered"] == 124
     assert payload["meta"]["aliases"] == 25
     assert "get_kline" in names and "tencent_kline" in names
     alias = next(item for item in payload["data"] if item["name"] == "get_kline")
@@ -85,7 +85,7 @@ def test_tool_list_publishes_121_tools_and_25_aliases(run_cli_json) -> None:
 
     code, payload, _ = run_cli_json("tool", "list", "--no-aliases")
     assert code == 0
-    assert len(payload["data"]) == 121
+    assert len(payload["data"]) == 124
 
     code, payload, _ = run_cli_json("tool", "list", "--layer", "quotes")
     assert code == 0
@@ -127,7 +127,7 @@ def test_doctor_reports_offline_degradation(run_cli_json) -> None:
     assert code == 0
     assert payload["data"]["status"] in {"ok", "degraded"}
     checks = {item["check"]: item for item in payload["data"]["checks"]}
-    assert checks["tools"]["detail"] == "121 tools + 25 aliases"
+    assert checks["tools"]["detail"] == "124 tools + 25 aliases"
     assert checks["cache"]["status"] == "warn"  # the fixture forces in-process cache
     assert payload["data"]["advice"].startswith("run `th-cn config check`")
 

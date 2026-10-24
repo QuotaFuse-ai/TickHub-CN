@@ -1,6 +1,6 @@
 # Tool catalogue
 
-121 canonical tools + 25 aliases = 146 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
+124 canonical tools + 25 aliases = 149 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
 
 TTL is the cache lifetime in seconds; `—` means the alias shares its target's behaviour and the response is not cached separately.
 
@@ -29,12 +29,14 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `baostock_st_list` | — | 604800 | Historical ST / *ST records (baostock). |
 | `baostock_stock_basic` | `code` | 604800 | Listing / delisting dates and status (baostock). |
 | `baostock_valuation_history` | `code`, `start`, `end` | 604800 | Historical PE/PB/PS/PCF and turnover (baostock, no BSE). |
+| `cninfo_financial_notes` | `code`, `year`, `limit` | 86400 | Locate annual and audit reports that carry the financial-statement notes (CNINFO PDFs). |
 | `eastmoney_finance_indicators` | `code`, `periods` | 86400 | Key financial indicators (EPS, BPS, revenue, net profit, ROE). |
 | `eastmoney_financial_all` | `code`, `periods` | 86400 | All three statements plus key indicators for the latest periods. |
 | `eastmoney_financial_report` | `code`, `statement`, `periods`, `report_date` | 86400 | Financial statements (balance / income / cashflow) from Eastmoney datacenter. |
 | `finance_crosscheck` | `code`, `report_date`, `tolerance`, `strict` | 86400 | Cross-check financial statements (assets = liabilities + equity, etc.). |
 | `main_business` | `code`, `periods` | 86400 | Main business breakdown by industry, product and region (Eastmoney F10). |
 | `sina_financial_report` | `code`, `statement`, `periods` | 86400 | Financial statements from Sina (secondary source). |
+| `stock_f10_tips` | `code` | 86400 | TDX F10 latest-tips dossier: indicators, announcements, news, block trades and margin (mootdx). |
 | `stock_profile` | `code` | 604800 | Stock profile: name, industry, market cap, float shares, PE/PB. |
 | `top_shareholders` | `code`, `holder_type`, `periods` | 86400 | Top-10 shareholders (total or free-float) with position changes (Eastmoney F10). |
 
@@ -129,6 +131,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `index_weights` | `index_code` | 86400 | Index constituent weights from the Eastmoney component report. |
 | `is_trading_day` | `date` | 604800 | Whether a date is an exchange trading day. |
 | `market_calendar_summary` | `days` | 604800 | Recent trading days plus today's session state. |
+| `sw_industry_history` | `code`, `as_of`, `limit` | 604800 | Shenwan industry classification history for one stock (SW Research workbook). |
 | `sw_industry_index` | `code`, `days` | 86400 | Shenwan industry index history (best effort across Eastmoney secid layouts). |
 | `trading_calendar` | `start`, `end`, `limit` | 604800 | Trading dates derived from the SSE composite daily K-line. |
 

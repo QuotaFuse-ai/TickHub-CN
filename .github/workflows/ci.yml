@@ -44,7 +44,7 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Import smoke test
-        run: python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 146, tool_count()"
+        run: python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 149, tool_count()"
 
       - name: Run tests
         run: python -m pytest

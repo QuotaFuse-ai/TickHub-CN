@@ -55,7 +55,7 @@ def test_http_mcp_serves_the_same_catalogue(tmp_path: Path) -> None:
     assert result["server"] == "tickhub-cn"
     assert result["version"]
     names = {tool["name"] for tool in result["tools"]}
-    assert len(names) == 146
+    assert len(names) == 149
     assert "get_kline" in names
 
     payload = json.loads(result["call"]["content"][0]["text"])
@@ -71,4 +71,4 @@ def test_http_mcp_serves_the_same_catalogue(tmp_path: Path) -> None:
     starts = [row for row in journal.rows if row.get("event") == "mcp_start"]
     assert starts, journal.bad_lines
     assert starts[0]["detail"]["transport"] == "http"
-    assert starts[0]["detail"]["tools"] == 146
+    assert starts[0]["detail"]["tools"] == 149

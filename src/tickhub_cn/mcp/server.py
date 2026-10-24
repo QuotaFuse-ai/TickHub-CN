@@ -27,6 +27,7 @@ Rules for callers:
   cache_hit, confidence, trace_id}}. Quote meta.source when citing data.
 - Optional keyword arguments on every tool:
   fields="a,b"    project the response to those fields
+  tier=brief      output granularity: brief | medium | full (full is default)
   data_as_of=ISO  point-in-time view: drop rows published after that moment
   _refresh=true   bypass cache and refetch
   _no_cache=true  skip cache for this call

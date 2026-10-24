@@ -81,6 +81,7 @@ for _name, _sub in {
 class State:
     output: str = "json"
     fields: str = ""
+    tier: str = ""
     no_cache: bool = False
     refresh: bool = False
     quiet: bool = False
@@ -102,6 +103,7 @@ def _root(
     ),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="json | table | csv | yaml (default json)."),
     fields: Optional[str] = typer.Option(None, "--fields", help="Comma-separated projection, e.g. code,name,price."),
+    tier: Optional[str] = typer.Option(None, "--tier", help="Output granularity: brief | medium | full."),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the cache for this call."),
     refresh_cache: bool = typer.Option(False, "--refresh-cache", help="Refetch and overwrite the cache."),
     timeout: Optional[float] = typer.Option(None, "--timeout", help="Per-request timeout in seconds."),
@@ -113,7 +115,15 @@ def _root(
     fmt = (output or "json").lower()
     if fmt not in FORMATS:
         raise typer.BadParameter(f"unsupported output format: {output}")
-    ctx.obj = State(output=fmt, fields=fields or "", no_cache=no_cache, refresh=refresh_cache, quiet=quiet, verbose=verbose)
+    ctx.obj = State(
+        output=fmt,
+        fields=fields or "",
+        tier=(tier or "").strip().lower(),
+        no_cache=no_cache,
+        refresh=refresh_cache,
+        quiet=quiet,
+        verbose=verbose,
+    )
 
     settings = get_settings()
     if timeout is not None:
@@ -132,6 +142,7 @@ def _state(
     *,
     output: Optional[str] = None,
     fields: Optional[str] = None,
+    tier: Optional[str] = None,
     no_cache: bool = False,
     refresh: bool = False,
 ) -> State:
@@ -143,6 +154,8 @@ def _state(
         base.output = fmt
     if fields:
         base.fields = fields
+    if tier:
+        base.tier = tier.strip().lower()
     base.no_cache = base.no_cache or no_cache
     base.refresh = base.refresh or refresh
     return base
@@ -176,6 +189,8 @@ def _call(state: State, name: str, **params: Any) -> Any:
     merged = _params(**params)
     if state.fields:
         merged["fields"] = state.fields
+    if state.tier:
+        merged["tier"] = state.tier
     if state.no_cache:
         merged["_no_cache"] = True
     if state.refresh:
@@ -538,11 +553,12 @@ def tool_call(
     params: str = typer.Option("{}", "--params", help="JSON object of tool arguments."),
     output: Optional[str] = _out_opt(),
     fields: Optional[str] = _fields_opt(),
+    tier: Optional[str] = typer.Option(None, "--tier", help="Output granularity: brief | medium | full."),
     no_cache: bool = typer.Option(False, "--no-cache"),
     refresh: bool = typer.Option(False, "--refresh-cache"),
 ) -> None:
     """Call any tool by name."""
-    state = _state(_ctx(), output=output, fields=fields, no_cache=no_cache, refresh=refresh)
+    state = _state(_ctx(), output=output, fields=fields, tier=tier, no_cache=no_cache, refresh=refresh)
 
     def body() -> Any:
         try:

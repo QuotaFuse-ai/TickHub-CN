@@ -41,6 +41,7 @@ SOURCE_LIMITS: dict[str, tuple[float, int, int]] = {
     "gfex": (0.5, 60, 60),
     "sge": (0.5, 60, 60),
     "sse": (0.2, 120, 60),
+    "swsresearch": (1.0, 6, 60),
 }
 
 
@@ -176,6 +177,7 @@ def fetch(
     retries: int | None = None,
     allow_status: tuple[int, ...] = (),
     allow_redirects: bool = True,
+    verify: bool | str = True,
 ) -> requests.Response:
     """Throttled fetch returning the raw response.
 
@@ -201,6 +203,7 @@ def fetch(
                 timeout=timeout,
                 proxies=_proxy_for(source),
                 allow_redirects=allow_redirects,
+                verify=verify,
             )
             latency = (time.monotonic() - started) * 1000
             if resp.status_code in allow_status:

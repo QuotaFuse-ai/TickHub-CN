@@ -1,7 +1,7 @@
 """External field mapping (aliases / hiding / default projection).
 
-Priority: per-call ``fields`` > environment override > ``field_map.toml`` >
-original full payload.
+Priority: per-call ``fields`` > per-call ``tier`` > environment override >
+``field_map.toml`` default_fields > original full payload.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any
 
 from ..core.config import get_settings
 from ..logging.setup import get_logger
+from .tiers import TIER_FALLBACK_ROWS, tier_fields
 
 try:
     import toml
@@ -81,13 +82,21 @@ class FieldMap:
         *,
         fields: list[str] | str | None = None,
         env_key: str | None = None,
+        tier: str | None = None,
+        _cap: int = 0,
     ) -> Any:
         mapping = self.mapping_for(tool)
         selected: list[str] | None
+        tier_cap = _cap
         if isinstance(fields, str):
             selected = [x.strip() for x in fields.split(",") if x.strip()]
         elif fields:
             selected = list(fields)
+        elif tier == "full":
+            selected = None
+        elif tier:
+            selected = tier_fields(self.raw, tier, tool)
+            tier_cap = TIER_FALLBACK_ROWS.get(tier, 0)
         else:
             selected = self._select_fields(tool, env_key)
 
@@ -100,17 +109,24 @@ class FieldMap:
                 if selected and mapped not in selected and key not in selected and not mapped.startswith("_"):
                     continue
                 out[mapped] = value
+            if not out and tier_cap and row:
+                # The preset named nothing this upstream emits; keep a bounded
+                # slice of the row instead of returning an empty object.
+                for key, value in list(row.items())[:tier_cap]:
+                    if key in mapping.hide or key in self._global_hide:
+                        continue
+                    out[mapping.alias.get(key, key)] = value
             return out
 
         if isinstance(data, list):
             return [_rename_and_hide(r) if isinstance(r, dict) else r for r in data]
         if isinstance(data, dict):
-            if mapping.hide or mapping.alias or selected:
+            if mapping.hide or self._global_hide or mapping.alias or selected:
                 nested: dict[str, Any] = {}
                 scalars: dict[str, Any] = {}
                 for key, value in data.items():
                     if isinstance(value, list) and value and isinstance(value[0], dict):
-                        rows = self.apply(tool, value, fields=selected)
+                        rows = self.apply(tool, value, fields=selected, _cap=tier_cap)
                         # A selection names row fields (``revenue``, ``date``),
                         # so the list container survives even though it is not
                         # itself named. When nothing matches the rows, the

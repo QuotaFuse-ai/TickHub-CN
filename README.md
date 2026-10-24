@@ -1,7 +1,7 @@
 # TickHub-CN
 
 A-share (mainland China) market data, packaged as structured tools for AI
-agents. TickHub-CN exposes **121 MCP tools** (plus 25 compatibility aliases)
+agents. TickHub-CN exposes **124 MCP tools** (plus 25 compatibility aliases)
 over **MCP stdio** and **MCP Streamable HTTP**, and the same surface over a
 scriptable CLI (`th-cn`).
 
@@ -12,7 +12,7 @@ and labels it with provenance.
 
 ```
 th-cn (CLI)  ─┐
-              ├─► tool registry (121 tools, 14 layers) ─► upstream sources
+              ├─► tool registry (124 tools, 14 layers) ─► upstream sources
 MCP stdio ────┤                                          Eastmoney · Tencent ·
 MCP HTTP  ────┘                                          CNINFO · Sina · exchanges
 ```
@@ -34,7 +34,8 @@ pip install -e ".[dev]"         # or: pip install tickhub-cn
 Optional feature groups: `.[crawl]` (Crawl4AI), `.[admin]` (Admin Console),
 `.[sources]` (akshare / baostock / pandas), `.[db]` (log DB), `.[all]`.
 `.[sources-legacy]` installs mootdx on request; it pins `httpx<0.26` and
-`tenacity<9`, so it is kept out of the default extra (nothing imports it).
+`tenacity<9`, so it is kept out of the default extra. Only `stock_f10_tips`
+imports it, lazily at call time.
 
 ## Quick start
 
@@ -114,14 +115,14 @@ Optional arguments accepted by every tool: `fields="code,name,price"` (projectio
 | Layer | Tools | Examples |
 | --- | --- | --- |
 | quotes | 13 | `tencent_quote`, `tencent_kline`, `tencent_minute`, `tencent_ticks` |
-| financials | 9 | `stock_profile`, `eastmoney_financial_report`, `finance_crosscheck` |
-| market | 16 | `market_overview`, `limit_up_pool`, `dragon_tiger`, `industry_boards` |
-| funds | 15 | `stock_fund_flow`, `northbound_flow`, `margin_detail`, `block_trades` |
+| financials | 13 | `stock_profile`, `eastmoney_financial_report`, `cninfo_financial_notes` |
+| market | 23 | `market_overview`, `limit_up_pool`, `dragon_tiger`, `industry_boards` |
+| funds | 16 | `stock_fund_flow`, `northbound_flow`, `margin_detail`, `block_trades` |
 | macro | 12 | `china_gdp`, `china_cpi`, `china_pmi`, `china_money_supply` |
 | announcements | 9 | `cninfo_announcements`, `cls_telegraph`, `cctv_news` |
-| index | 9 | `index_kline`, `index_constituents`, `trading_calendar` |
+| index | 10 | `index_kline`, `index_constituents`, `sw_industry_history` |
 | futures | 7 | `futures_realtime`, `futures_position_rank`, `sge_spot` |
-| event | 6 | `earnings_forecast`, `share_buyback`, `holder_trades` |
+| event | 7 | `earnings_forecast`, `share_buyback`, `holder_trades` |
 | research | 6 | `eastmoney_reports`, `eastmoney_report_pdf`, `ths_eps_forecast` |
 | sentiment | 3 | `cninfo_irm`, `sse_e_interaction`, `em_hot_concept` |
 | option | 3 | `sina_option_codes`, `sina_option_greeks`, `sina_option_tquote` |

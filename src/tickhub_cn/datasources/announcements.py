@@ -29,7 +29,15 @@ def _cninfo_org_id(code: str) -> str:
     return ""
 
 
-def _cninfo_rows(code: str, start: str, end: str, category: str, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
+def _cninfo_rows(
+    code: str,
+    start: str,
+    end: str,
+    category: str,
+    page: int,
+    page_size: int,
+    searchkey: str = "",
+) -> tuple[list[dict[str, Any]], int]:
     org_id = _cninfo_org_id(code)
     payload = {
         "pageNum": str(max(1, int(page or 1))),
@@ -37,8 +45,9 @@ def _cninfo_rows(code: str, start: str, end: str, category: str, page: int, page
         "column": "szse",
         "tabName": "fulltext",
         "plate": "",
+        # An empty org id makes CNINFO search every issuer, so it must be resolved.
         "stock": f"{code},{org_id}",
-        "searchkey": "",
+        "searchkey": searchkey,
         "secdate": "",
         "tdate": "",
         "type": category or "",

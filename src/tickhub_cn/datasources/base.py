@@ -22,6 +22,7 @@ from ..cache.redis_cache import TTL, get_cache
 from ..core.errors import TickHubError, as_error
 from ..core.provenance import as_of_filter, trace_id
 from ..fieldmap.loader import get_field_map
+from ..fieldmap.tiers import normalize_tier
 
 
 @dataclass
@@ -40,20 +41,21 @@ LAYERS: dict[str, list[str]] = {}
 
 
 def _signature_with_controls(sig: inspect.Signature) -> inspect.Signature:
-    params = [p for p in sig.parameters.values() if p.name not in ("data_as_of", "fields")]
+    params = [p for p in sig.parameters.values() if p.name not in ("data_as_of", "fields", "tier")]
     params += [
         inspect.Parameter("data_as_of", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
         inspect.Parameter("fields", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
+        inspect.Parameter("tier", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
     ]
     return sig.replace(parameters=params)
 
 
-def _apply_projection(tool_name: str, payload: Any, fields: str | list[str] | None) -> Any:
+def _apply_projection(tool_name: str, payload: Any, fields: str | list[str] | None, tier: str | None = None) -> Any:
     if not isinstance(payload, dict) or "data" not in payload:
         return payload
     try:
         payload = copy.deepcopy(payload)
-        payload["data"] = get_field_map().apply(tool_name, payload["data"], fields=fields)
+        payload["data"] = get_field_map().apply(tool_name, payload["data"], fields=fields, tier=tier)
     except Exception:  # projection must never break data delivery
         pass
     return payload
@@ -101,6 +103,10 @@ def tool(
             no_cache = bool(kwargs.pop("_no_cache", False))
             fields = kwargs.pop("fields", "") or None
             data_as_of = kwargs.pop("data_as_of", "") or None
+            try:
+                tier = normalize_tier(kwargs.pop("tier", "")) or None
+            except ValueError as exc:
+                raise TickHubError("QFSD-9001", str(exc)) from exc
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
             call_kwargs = dict(bound.arguments)
@@ -126,7 +132,7 @@ def tool(
                 payload = producer()
 
             payload = _apply_as_of(payload, data_as_of)
-            payload = _apply_projection(tool_name, payload, fields)
+            payload = _apply_projection(tool_name, payload, fields, tier)
             return payload
 
         wrapper.__signature__ = _signature_with_controls(sig)  # type: ignore[attr-defined]

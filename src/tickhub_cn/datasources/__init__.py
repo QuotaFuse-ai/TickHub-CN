@@ -5,6 +5,7 @@ from . import (  # noqa: F401
     backups,
     bonds,
     events,
+    f10,
     financials,
     funds,
     futures,
@@ -15,6 +16,7 @@ from . import (  # noqa: F401
     options,
     quotes,
     research,
+    sw_industry,
     valuation,
 )
 from .base import (  # noqa: F401

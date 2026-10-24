@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TickHub-CN 管理控制台</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1d2430; --muted: #5b6675; --line: #d8dee8; --bg: #fff;
+    --accent: #0b63c5; --ok: #12805c; --warn: #b25e09; --bad: #b42318;
+    --soft: #f4f6fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e6eaf0; --muted: #9aa6b5; --line: #33404f; --bg: #151b23;
+            --accent: #6fb0ff; --ok: #4ad6a4; --warn: #f0a44a; --bad: #ff8a7a;
+            --soft: #1c242e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.55 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  a { color: var(--accent); }
+  header { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 12px;
+           align-items: center; justify-content: space-between; padding: 10px 20px;
+           border-bottom: 1px solid var(--line); background: var(--bg); }
+  header h1 { margin: 0; font-size: 17px; }
+  header .spacer { flex: 1; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+           border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .badge.bad { color: var(--bad); border-color: var(--bad); }
+  .layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: calc(100vh - 53px); }
+  nav { padding: 14px 10px; border-right: 1px solid var(--line); }
+  nav a { display: block; padding: 7px 10px; border-radius: 7px; text-decoration: none;
+          color: var(--fg); font-size: 13.5px; }
+  nav a:hover { background: var(--soft); }
+  nav a.active { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+  main { padding: 20px 24px 56px; max-width: 1280px; }
+  h2 { font-size: 19px; margin: 0 0 2px; }
+  p.sub { margin: 0 0 18px; color: var(--muted); }
+  h3 { font-size: 15px; margin: 24px 0 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card .k { font-size: 12px; color: var(--muted); }
+  .card .v { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 12px 0; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, textarea, button { font: inherit; padding: 7px 9px; border: 1px solid var(--line);
+          border-radius: 7px; background: transparent; color: var(--fg); }
+  textarea { width: 100%; min-height: 380px; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 53px; background: var(--bg); }
+  td { font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  pre { overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 8px;
+        background: var(--soft); font-size: 12px; max-height: 460px; }
+  .muted { color: var(--muted); }
+  .err { color: var(--bad); white-space: pre-wrap; }
+  .ok { color: var(--ok); }
+  #toast { position: fixed; right: 18px; bottom: 18px; max-width: 460px; padding: 10px 14px;
+           border: 1px solid var(--line); border-radius: 8px; background: var(--soft);
+           box-shadow: 0 6px 20px rgba(0,0,0,.18); display: none; white-space: pre-wrap; }
+  .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
+  details summary { cursor: pointer; color: var(--muted); }
+  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .kv { display: grid; grid-template-columns: minmax(140px, 240px) minmax(0, 1fr); gap: 2px 14px; font-size: 13px; }
+  .kv dt { color: var(--muted); overflow-wrap: anywhere; }
+  .kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    nav a { white-space: nowrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>TickHub-CN 管理控制台</h1>
+  <span id="version" class="badge">未连接</span>
+  <span id="ro" class="badge" hidden></span>
+  <span class="spacer"></span>
+  <label style="flex-direction:row;align-items:center;gap:6px;">
+    管理令牌
+    <input id="token" type="password" autocomplete="off" placeholder="ADMIN_AUTH_TOKEN（本机可留空）" style="width:230px;" />
+  </label>
+  <button id="connect" class="primary" type="button">连接</button>
+</header>
+
+<div class="layout">
+  <nav id="nav">
+    <a href="#/dashboard" data-route="dashboard">概览</a>
+    <a href="#/sources" data-route="sources">数据源健康</a>
+    <a href="#/cache" data-route="cache">缓存</a>
+    <a href="#/proxy" data-route="proxy">代理池</a>
+    <a href="#/fieldmap" data-route="fieldmap">字段映射</a>
+    <a href="#/mcp" data-route="mcp">MCP 调试</a>
+    <a href="#/data" data-route="data">数据核查</a>
+    <a href="#/crawler" data-route="crawler">抓取任务</a>
+    <a href="#/logs" data-route="logs">日志</a>
+    <a href="#/config" data-route="config">运行配置</a>
+    <a href="#/audit" data-route="audit">审计</a>
+  </nav>
+  <main id="view"></main>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------- state */
+
+const state = {
+  token: sessionStorage.getItem("tickhub_admin_token") || "",
+  readonly: null,
+  status: null,
+  tools: null,
+  toolsView: null,
+  mcpLayer: "",
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+/* -------------------------------------------------------------- helpers */
+
+function esc(value) {
+  if (value === null || value === undefined) return "<span class='muted'>—</span>";
+  if (typeof value === "object") return esc(JSON.stringify(value));
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+function boolBadge(flag, good = "正常", bad = "异常") {
+  return flag ? `<span class="badge ok">${esc(good)}</span>` : `<span class="badge bad">${esc(bad)}</span>`;
+}
+
+function toast(message, isError) {
+  const box = $("#toast");
+  box.textContent = message;
+  box.classList.toggle("err", Boolean(isError));
+  box.style.display = "block";
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { box.style.display = "none"; }, isError ? 8000 : 3500);
+}
+
+async function api(path, options = {}) {
+  const headers = Object.assign({ Accept: "application/json" }, options.headers || {});
+  if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  if (state.token) headers["X-Admin-Token"] = state.token;
+
+  const response = await fetch(path, Object.assign({}, options, { headers, credentials: "same-origin" }));
+  let payload = null;
+  try { payload = await response.json(); } catch (_) { /* non-JSON body */ }
+
+  if (response.status === 401) {
+    setConnected(false);
+    throw new Error("鉴权失败（401）：请在顶部填写 ADMIN_AUTH_TOKEN");
+  }
+  if (!response.ok) {
+    const detail = payload && payload.detail !== undefined ? payload.detail
+                 : payload && payload.error ? payload.error
+                 : payload;
+    throw Object.assign(new Error(typeof detail === "string" ? detail : JSON.stringify(detail)), {
+      status: response.status, payload,
+    });
+  }
+  return payload;
+}
+
+function post(path, body) {
+  return api(path, { method: "POST", body: JSON.stringify(body || {}) });
+}
+
+function table(rows, columns) {
+  if (!Array.isArray(rows) || !rows.length) return "<p class='empty'>没有记录。</p>";
+  const keys = columns || (() => {
+    const out = [];
+    for (const row of rows) {
+      if (row && typeof row === "object") for (const k of Object.keys(row)) if (!out.includes(k)) out.push(k);
+    }
+    return out;
+  })();
+  if (!keys.length) return `<pre>${esc(JSON.stringify(rows, null, 2))}</pre>`;
+
+  const body = rows.slice(0, 500).map((row) =>
+    `<tr>${keys.map((k) => `<td>${esc(row ? row[k] : "")}</td>`).join("")}</tr>`).join("");
+  const more = rows.length > 500 ? `<p class="muted">仅显示前 500 / ${rows.length} 行。</p>` : "";
+  return `<div class="scroll"><table><thead><tr>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr></thead>
+    <tbody>${body}</tbody></table></div>${more}`;
+}
+
+function kv(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "<p class='empty'>没有记录。</p>";
+  const items = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  return `<dl class="kv">${items}</dl>`;
+}
+
+function cards(items) {
+  return `<div class="cards">${items.map(([k, v, cls]) =>
+    `<div class="card"><div class="k">${esc(k)}</div><div class="v ${cls || ""}">${esc(v)}</div></div>`).join("")}</div>`;
+}
+
+function pre(value) {
+  return `<pre>${esc(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>`;
+}
+
+function writeButton(label, action, extra = "", cls = "primary") {
+  const disabled = state.readonly ? "disabled" : "";
+  return `<button type="button" class="${cls}" data-action="${esc(action)}" ${disabled}>${esc(label)}</button>${extra}`;
+}
+
+function guardReadonly() {
+  if (state.readonly) {
+    toast("控制台处于只读模式（ADMIN_READONLY=true），写操作已禁用", true);
+    return false;
+  }
+  return true;
+}
+
+async function runAction(button, fn) {
+  const original = button.textContent;
+  button.disabled = true;
+  try { await fn(); }
+  catch (exc) { toast(exc.message || String(exc), true); }
+  finally { button.textContent = original; button.disabled = Boolean(state.readonly); }
+}
+
+/* ------------------------------------------------------------ connection */
+
+function setConnected(ok, status) {
+  const version = $("#version");
+  if (ok && status) {
+    state.status = status;
+    state.readonly = Boolean(status.readonly);
+    version.textContent = `v${status.version}`;
+    version.className = "badge ok";
+    const ro = $("#ro");
+    ro.hidden = false;
+    ro.textContent = status.readonly ? "只读模式" : "可写";
+    ro.className = "badge " + (status.readonly ? "warn" : "ok");
+  } else {
+    version.textContent = "未连接";
+    version.className = "badge bad";
+    $("#ro").hidden = true;
+  }
+}
+
+async function connect(silent = false) {
+  state.token = $("#token").value.trim();
+  if (state.token) sessionStorage.setItem("tickhub_admin_token", state.token);
+  else sessionStorage.removeItem("tickhub_admin_token");
+  try {
+    const status = await api("/api/status");
+    setConnected(true, status);
+    if (!silent) toast("已连接");
+    return true;
+  } catch (exc) {
+    setConnected(false);
+    if (!silent) toast(exc.message || String(exc), true);
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------- views */
+
+const views = {};
+
+views.dashboard = async () => {
+  const status = await api("/api/status");
+  setConnected(true, status);
+  const layerCount = Object.values(status.layers || {}).reduce((a, b) => a + b, 0);
+  const cache = status.cache || {};
+  const crawler = status.crawler || {};
+  const health = status.health || {};
+  const healthRows = Object.values(health);
+  const failing = healthRows.filter((h) => h && h.ok === false).length;
+
+  return `
+    <h2>概览</h2>
+    <p class="sub">版本、缓存与采集状态；数据来自 <code>/api/status</code>。</p>
+    ${cards([
+      ["版本", status.version],
+      ["运行时长", fmtDuration(status.uptime_s)],
+      ["鉴权方式", status.auth],
+      ["工具数", status.tools],
+      ["已装载字段", layerCount],
+      ["数据源异常", failing, failing ? "err" : "ok"],
+    ])}
+    <div class="split">
+      <section>
+        <h3>缓存</h3>
+        ${kv([
+          ["后端", cache.backend],
+          ["命中 / 未命中", `${cache.hits ?? 0} / ${cache.misses ?? 0}`],
+          ["命中率", cache.hit_rate !== undefined ? `${(cache.hit_rate * 100).toFixed(1)}%` : "—"],
+          ["键数量", cache.keys ?? "—"],
+          ["环境", cache.env],
+          ["错误", cache.error],
+        ])}
+      </section>
+      <section>
+        <h3>定时采集</h3>
+        ${kv([
+          ["启用", crawler.enabled],
+          ["Cron", crawler.cron],
+          ["并发", crawler.concurrency],
+          ["关注范围", crawler.watchlist],
+          ["上次任务", crawler.last_task],
+          ["归档", crawler.archive],
+        ])}
+      </section>
+    </div>
+    <h3>各层工具数</h3>
+    ${table(Object.entries(status.layers || {}).map(([layer, toolNames]) =>
+      ({ 层: layer, 数量: Array.isArray(toolNames) ? toolNames.length : toolNames })))}
+    <h3>数据源健康（进程内计数）</h3>
+    ${table(healthRows)}
+    <div class="row"><button type="button" class="primary" data-action="refresh-view">刷新</button></div>`;
+};
+
+views.sources = async () => {
+  const data = await api("/api/sources");
+  const health = data.health || {};
+  const layers = data.layers || {};
+  const layerRows = Object.entries(layers).map(([layer, names]) => ({
+    层: layer, 数量: Array.isArray(names) ? names.length : names,
+    工具: Array.isArray(names) ? names.join(", ") : String(names),
+  }));
+  return `
+    <h2>数据源健康</h2>
+    <p class="sub">健康状态来自实际请求的计数，不是主动探测；<code>POST /api/sources/check</code> 只导出当前快照。</p>
+    <div class="row">
+      ${writeButton("导出健康快照", "sources-check")}
+      <button type="button" data-action="refresh-view">刷新</button>
+    </div>
+    <h3>健康快照</h3>
+    ${table(Object.values(health))}
+    <h3>数据层</h3>
+    ${table(layerRows, ["层", "数量", "工具"])}
+    <div id="action-result"></div>`;
+};
+
+views.cache = async () => {
+  const stats = await api("/api/cache/stats");
+  return `
+    <h2>缓存</h2>
+    <p class="sub">Redis 不可用时自动降级为进程内缓存（backend=memory）。</p>
+    ${cards([
+      ["后端", stats.backend],
+      ["命中率", stats.hit_rate !== undefined ? `${(stats.hit_rate * 100).toFixed(1)}%` : "—"],
+      ["命中", stats.hits],
+      ["未命中", stats.misses],
+      ["键数量", stats.keys ?? "—"],
+      ["环境", stats.env],
+    ])}
+    <h3>失效缓存</h3>
+    <div class="row">
+      <label>前缀（留空 = 全量）<input id="cache-prefix" placeholder="例如 kline 或 qf:prod:cache" /></label>
+      ${writeButton("失效", "cache-flush", "", "danger")}
+      <button type="button" data-action="refresh-view">刷新</button>
+    </div>
+    <div id="action-result"></div>`;
+};
+
+views.proxy = async () => {
+  const data = await api("/api/proxy");
+  const nodes = data.nodes || [];
+  return `
+    <h2>代理池</h2>
+    <p class="sub">节点凭据始终脱敏展示；<code>check</code> 会真实探测，<code>reload</code> 重新读取配置。</p>
+    ${cards([["启用", data.enabled ? "是" : "否"], ["节点数", nodes.length]])}
+    <div class="row">
+      ${writeButton("全部探测", "proxy-check")}
+      ${writeButton("重新加载", "proxy-reload")}
+      <button type="button" data-action="refresh-view">刷新</button>
+    </div>
+    <div id="action-result"></div>
+    <h3>节点</h3>
+    ${table(nodes)}`;
+};
+
+views.fieldmap = async () => {
+  const data = await api("/api/fieldmap");
+  return `
+    <h2>字段映射</h2>
+    <p class="sub">
+      文件：<code>${esc(data.path)}</code>（${data.exists ? "已存在" : "不存在，保存后创建"}）。
+      保存前会校验 TOML，并保留一份 <code>.bak</code> 备份。
+    </p>
+    <div class="row">
+      ${writeButton("保存并热加载", "fieldmap-save")}
+      <button type="button" data-action="fieldmap-revert">重新读取</button>
+    </div>
+    <textarea id="fieldmap" spellcheck="false">${esc(data.content)}</textarea>
+    <div id="action-result"></div>
+    <h3>预览</h3>
+    <div class="row">
+      <label>工具<input id="preview-tool" value="get_kline" style="width:180px;" /></label>
+      <label>代码<input id="preview-code" value="600000" style="width:130px;" /></label>
+      <button type="button" class="primary" data-action="fieldmap-preview">调用预览</button>
+    </div>
+    <div id="preview-result"></div>`;
+};
+
+views.mcp = async () => {
+  if (!state.tools) state.tools = await api("/api/mcp/tools");
+  const data = state.mcpLayer ? state.toolsView : state.tools;
+  const layers = [...new Set((state.tools.tools || []).map((t) => t.layer))].sort();
+  const rows = (data.tools || []).map((t) => ({
+    name: t.name, layer: t.layer, params: (t.params || []).join(", "),
+    ttl: t.ttl_seconds, description: t.description,
+  }));
+  return `
+    <h2>MCP 调试</h2>
+    <p class="sub">共 <b>${esc(state.tools.count)}</b> 个工具；调用结果与 MCP 客户端拿到的 envelope 一致。</p>
+    <div class="row">
+      <label>按层筛选
+        <select id="mcp-layer">
+          <option value="">全部</option>
+          ${layers.map((l) => `<option value="${esc(l)}" ${state.mcpLayer === l ? "selected" : ""}>${esc(l)}</option>`).join("")}
+        </select>
+      </label>
+      <button type="button" data-action="mcp-filter">筛选</button>
+    </div>
+    <div id="mcp-tools">${table(rows, ["name", "layer", "params", "ttl", "description"])}</div>
+    <h3>调用工具</h3>
+    <div class="row">
+      <label>工具<input id="call-tool" list="tool-names" placeholder="get_kline" style="width:200px;" />
+        <datalist id="tool-names">${(state.tools.tools || []).map((t) => `<option value="${esc(t.name)}"></option>`).join("")}</datalist>
+      </label>
+      ${writeButton("调用", "mcp-call")}
+    </div>
+    <label style="display:block;">参数（JSON 对象）
+      <textarea id="call-params" style="min-height:110px;" spellcheck="false">{"code": "600000"}</textarea>
+    </label>
+    <div id="action-result"></div>`;
+};
+
+views.data = async () => `
+  <h2>数据核查</h2>
+  <p class="sub">财报勾稽与风险事件读取；勾稽失败会返回 <code>QFSD-4001</code> 并阻断脏数据。</p>
+  <div class="row">
+    <label>股票代码<input id="data-code" value="600000" style="width:130px;" /></label>
+    <label>报告期（可选）<input id="data-date" placeholder="2026-06-30" style="width:140px;" /></label>
+    <button type="button" class="primary" data-action="data-crosscheck">财报勾稽</button>
+    <button type="button" data-action="data-risk">风险事件</button>
+  </div>
+  <div id="action-result"></div>`;
+
+views.crawler = async () => {
+  const [data, queueData] = await Promise.all([api("/api/crawler/status"), api("/api/queue")]);
+  const queue = queueData.queue || {};
+  return `
+    <h2>抓取任务</h2>
+    <p class="sub">离线采集守护进程由 <code>th-cn crawler start</code> 管理；此处只读取状态并触发单次任务。</p>
+    ${cards([
+      ["启用", data.enabled ? "是" : "否"],
+      ["Cron", data.cron],
+      ["并发", data.concurrency],
+      ["关注范围", data.watchlist],
+    ])}
+    <h3>守护进程</h3>
+    ${kv(Object.entries(data.daemon || {}))}
+    <h3>队列长度</h3>
+    ${kv(Object.entries(queue))}
+    <h3>触发一次任务</h3>
+    <div class="row">
+      <label>任务
+        <select id="crawler-task">
+          <option value="all">all</option>
+          <option value="announcements">announcements</option>
+          <option value="reports">reports</option>
+          <option value="risks">risks</option>
+        </select>
+      </label>
+      <label>代码（可选，逗号分隔）<input id="crawler-codes" placeholder="600000,000001" style="width:200px;" /></label>
+      <label>天数<input id="crawler-days" type="number" min="1" max="90" value="7" style="width:90px;" /></label>
+      ${writeButton("运行", "crawler-run")}
+    </div>
+    <div id="action-result"></div>
+    <h3>归档统计</h3>
+    ${kv(Object.entries(data.archive || {}))}`;
+};
+
+views.logs = async () => {
+  const data = await api("/api/logs?limit=200");
+  return `
+    <h2>日志</h2>
+    <p class="sub">来源 <code>${esc(data.source)}</code>，文件 <code>${esc(data.path)}</code>。</p>
+    <div class="row">
+      <label>级别
+        <select id="log-level">
+          <option value="">全部</option>
+          <option value="debug">debug</option><option value="info">info</option>
+          <option value="warning">warning</option><option value="error">error</option>
+        </select>
+      </label>
+      <label>关键字<input id="log-q" placeholder="消息或 payload" style="width:200px;" /></label>
+      <label>条数<input id="log-limit" type="number" min="1" max="500" value="200" style="width:90px;" /></label>
+      <button type="button" class="primary" data-action="logs-query">查询</button>
+    </div>
+    <div id="log-rows">${table(data.rows)}</div>`;
+};
+
+views.config = async () => {
+  const data = await api("/api/config");
+  return `
+    <h2>运行配置</h2>
+    <p class="sub">敏感项显示为 <code>***</code>；修改请通过环境变量或 <code>config/admin.toml</code>，本页只读。</p>
+    ${kv(Object.entries(data.config || {}))}`;
+};
+
+views.audit = async () => {
+  const data = await api("/api/audit?limit=200");
+  return `
+    <h2>审计</h2>
+    <p class="sub">所有写操作与鉴权事件都会落盘（<code>logs/admin_audit.jsonl</code>），最新在前。</p>
+    ${table(data.rows)}`;
+};
+
+/* ------------------------------------------------------------- actions */
+
+async function handleAction(action, button) {
+  const result = $("#action-result");
+  const show = (value) => { if (result) result.innerHTML = `<h3>结果</h3>${typeof value === "string" ? value : pre(value)}`; };
+
+  if (action === "refresh-view") return renderRoute(true);
+
+  if (action === "sources-check") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const data = await post("/api/sources/check");
+      show(kv([["来源数", Object.keys(data.health || {}).length], ["说明", data.note]]));
+      toast("已导出健康快照");
+    });
+  }
+
+  if (action === "cache-flush") {
+    if (!guardReadonly()) return;
+    const prefix = ($("#cache-prefix") || {}).value || "";
+    if (!window.confirm(prefix ? `确认失效前缀 “${prefix}” 下的缓存？` : "确认清空全部缓存？")) return;
+    return runAction(button, async () => {
+      const data = await post("/api/cache/flush", { prefix });
+      show(kv([["前缀", data.prefix || "（全部）"], ["移除键数", data.removed]]));
+      toast(`已移除 ${data.removed} 个键`);
+    });
+  }
+
+  if (action === "proxy-check" || action === "proxy-reload") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const data = await post(action === "proxy-check" ? "/api/proxy/check" : "/api/proxy/reload");
+      show(table(data.nodes || []));
+      toast(action === "proxy-check" ? "探测完成" : "代理池已重新加载");
+    });
+  }
+
+  if (action === "fieldmap-save") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const content = $("#fieldmap").value;
+      const data = await api("/api/fieldmap", { method: "PUT", body: JSON.stringify({ content }) });
+      show(kv([["已加载工具", (data.tools || []).length], ["工具列表", (data.tools || []).join(", ")]]));
+      toast("字段映射已保存并热加载");
+    });
+  }
+
+  if (action === "fieldmap-revert") {
+    return renderRoute(true);
+  }
+
+  if (action === "fieldmap-preview") {
+    const tool = $("#preview-tool").value.trim();
+    const code = $("#preview-code").value.trim();
+    return runAction(button, async () => {
+      const query = new URLSearchParams({ tool, code });
+      const data = await api(`/api/fieldmap/preview?${query}`);
+      $("#preview-result").innerHTML = `<h3>${esc(data.tool)}</h3>${kv([["参数", JSON.stringify(data.params)]])}${pre(data.payload)}`;
+    });
+  }
+
+  if (action === "mcp-filter") {
+    const layer = $("#mcp-layer").value;
+    state.mcpLayer = layer;
+    state.toolsView = layer
+      ? await api("/api/mcp/tools?layer=" + encodeURIComponent(layer))
+      : state.tools;
+    return renderRoute(true);
+  }
+
+  if (action === "mcp-call") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const tool = $("#call-tool").value.trim();
+      let params;
+      try { params = JSON.parse($("#call-params").value || "{}"); }
+      catch (_) { toast("参数不是合法 JSON", true); return; }
+      try {
+        const data = await post("/api/mcp/call", { tool, params });
+        show(pre(data.payload));
+      } catch (exc) {
+        show(pre(exc.payload || { error: exc.message }));
+        throw exc;
+      }
+    });
+  }
+
+  if (action === "data-crosscheck") {
+    const code = $("#data-code").value.trim();
+    const date = $("#data-date").value.trim();
+    const query = new URLSearchParams({ code, report_date: date });
+    return runAction(button, async () => {
+      const data = await api(`/api/crosscheck?${query}`);
+      show(pre(data.payload));
+    });
+  }
+
+  if (action === "data-risk") {
+    const code = $("#data-code").value.trim();
+    return runAction(button, async () => {
+      const data = await api(`/api/risk?${new URLSearchParams({ code, limit: "100" })}`);
+      show(table(data.events || []));
+    });
+  }
+
+  if (action === "crawler-run") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const body = {
+        task: $("#crawler-task").value,
+        days: Number($("#crawler-days").value || 7),
+        codes: ($("#crawler-codes").value || "").split(/[,\s]+/).filter(Boolean),
+      };
+      const data = await post("/api/crawler/run", body);
+      show(pre(data));
+      toast("任务已执行");
+    });
+  }
+
+  if (action === "logs-query") {
+    const query = new URLSearchParams({
+      limit: $("#log-limit").value || "200",
+      level: $("#log-level").value,
+      q: $("#log-q").value,
+    });
+    return runAction(button, async () => {
+      const data = await api(`/api/logs?${query}`);
+      $("#log-rows").innerHTML = table(data.rows);
+    });
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-action]");
+  if (!button) return;
+  event.preventDefault();
+  handleAction(button.dataset.action, button).catch((exc) => toast(exc.message || String(exc), true));
+});
+
+/* --------------------------------------------------------------- routing */
+
+const ROUTES = Object.keys(views);
+
+function currentRoute() {
+  const name = (location.hash.replace(/^#\//, "") || "dashboard").split("?")[0];
+  return ROUTES.includes(name) ? name : "dashboard";
+}
+
+let rendering = false;
+
+async function renderRoute(force = false) {
+  if (rendering) return;
+  rendering = true;
+  const route = currentRoute();
+  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === route));
+  const view = $("#view");
+  if (force) view.innerHTML = "<p class='muted'>加载中…</p>";
+  try {
+    view.innerHTML = await views[route]();
+  } catch (exc) {
+    view.innerHTML = `<h2>加载失败</h2><p class="err">${esc(exc.message || String(exc))}</p>
+      <div class="row"><button type="button" class="primary" data-action="refresh-view">重试</button></div>`;
+  } finally {
+    rendering = false;
+  }
+}
+
+function fmtDuration(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}天 ${h}小时`;
+  if (h) return `${h}小时 ${m}分`;
+  if (m) return `${m}分 ${s % 60}秒`;
+  return `${s}秒`;
+}
+
+window.addEventListener("hashchange", () => renderRoute());
+$("#connect").addEventListener("click", () => connect().then((ok) => { if (ok) renderRoute(true); }));
+$("#token").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); $("#connect").click(); }
+});
+
+$("#token").value = state.token;
+connect(true).then(() => renderRoute());
+</script>
+</body>
+</html>

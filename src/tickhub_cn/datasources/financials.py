@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from typing import Any
 
 from ..core.errors import TickHubError
@@ -542,10 +543,57 @@ def baostock_st_list() -> dict[str, Any]:
         bs.logout()
 
 
+@tool(layer="financials", ttl="semi_static", cache_domain="financial_notes")
+def cninfo_financial_notes(code: str, year: str = "", limit: int = 5) -> dict[str, Any]:
+    """Locate annual and audit reports that carry the financial-statement notes (CNINFO PDFs)."""
+    from .announcements import _cninfo_rows
+
+    c = stock_code(code)
+    year_text = str(year or "").strip()
+    if year_text and not (len(year_text) == 4 and year_text.isdigit()):
+        raise TickHubError("QFSD-9001", "year must be a four-digit fiscal year such as 2024")
+
+    annual, _ = _cninfo_rows(c, "", "", "category_ndbg_szsh", 1, 30)
+    reports: list[dict[str, Any]] = []
+    for row in annual:
+        title = str(row.get("title") or "")
+        if "摘要" in title or "英文" in title:
+            continue
+        if "年度报告" not in title and "年报" not in title:
+            continue
+        match = re.search(r"(\d{4})", title)
+        fiscal = match.group(1) if match else ""
+        if year_text and fiscal != year_text:
+            continue
+        reports.append({**row, "fiscal_year": fiscal or None})
+    reports.sort(key=lambda row: str(row.get("publish_time") or ""), reverse=True)
+    if limit and limit > 0:
+        reports = reports[: int(limit)]
+
+    audit, _ = _cninfo_rows(c, "", "", "", 1, 20, searchkey="审计报告")
+    audit.sort(key=lambda row: str(row.get("publish_time") or ""), reverse=True)
+    if year_text:
+        audit = [row for row in audit if year_text in str(row.get("title") or "")]
+
+    if not reports:
+        scope = f"{year_text} 年度" if year_text else "最近年度"
+        return empty("cninfo", f"{c} 未找到{scope}报告，无法定位财务报表附注")
+
+    return ok(
+        {"code": c, "year": year_text or None, "reports": reports, "audit_reports": audit[:3]},
+        "cninfo",
+        extra={
+            "count": len(reports),
+            "note": "财务报表附注随年度报告 PDF 一并发布，巨潮资讯不提供附注正文的独立接口；请打开年度报告 PDF 查阅附注。",
+        },
+    )
+
+
 __all__ = [
     "baostock_st_list",
     "baostock_stock_basic",
     "baostock_valuation_history",
+    "cninfo_financial_notes",
     "eastmoney_finance_indicators",
     "eastmoney_financial_all",
     "eastmoney_financial_report",

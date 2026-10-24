@@ -7,13 +7,29 @@
 #      matches either the source name or the alias, and keys starting with "_"
 #      are always kept for provenance.
 #
-# Precedence: per-call fields= argument > TICKHUB_FIELDS_<TOOL> env >
-# [tools.<name>].default_fields > full payload.
+# Precedence: per-call fields= argument > per-call tier= > TICKHUB_FIELDS_<TOOL>
+# env > [tools.<name>].default_fields > full payload.
 #
 # A missing file is not an error: the full payload is returned unchanged.
 
 [defaults]
 hide = []
+
+# ---------------------------------------------------------------------------
+# Output granularity presets (spec: brief / medium / full).
+#
+# tier= resolves against [tiers.<tier>]; a tool name wins over "*". `full`
+# skips field selection but [defaults].hide, [tools.*].hide and aliases still
+# apply. When a preset matches no field of an upstream's rows, the first 8
+# (brief) or 24 (medium) keys of each row are kept.
+#
+# [tiers.brief]
+# "*" = "code,name,date,price,close,change,pct_chg,volume,amount,title"
+# tencent_kline = "date,close,volume"
+#
+# [tiers.medium]
+# "*" = "code,name,date,open,high,low,close,price,pct_chg,volume,amount,pe,pb,total_mv"
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Example: keep quote payloads small and rename two fields.
