@@ -93,7 +93,7 @@ def test_catalogue_section_counts() -> None:
     assert {name: len(rows) for name, rows in layers.items()} == {
         name: len(tools) for name, tools in LAYERS.items()
     }
-    assert sum(len(rows) for rows in layers.values()) == 119
+    assert sum(len(rows) for rows in layers.values()) == 121
     assert len(parsed["alias"]) == 25
 
 
@@ -155,9 +155,9 @@ def test_tool_catalog_matches_registry() -> None:
 
 
 def test_mcp_tool_count_includes_aliases() -> None:
-    assert len(REGISTRY) == 119
+    assert len(REGISTRY) == 121
     assert len(ALIASES) == 25
-    assert tool_count() == 144
+    assert tool_count() == 146
 
 
 @pytest.mark.parametrize("name", ["stock_profile", "tencent_ticks", "apply_adjust"])

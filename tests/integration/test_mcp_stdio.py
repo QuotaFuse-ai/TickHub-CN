@@ -123,8 +123,8 @@ def test_stdio_handshake_catalogue_and_call(session: StdioSession) -> None:
     session.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     listed = session.response(2)
     tools = listed["result"]["tools"]
-    assert len(tools) == 144
-    assert len({tool["name"] for tool in tools}) == 144
+    assert len(tools) == 146
+    assert len({tool["name"] for tool in tools}) == 146
     for tool in tools:
         assert tool["inputSchema"]["type"] == "object", tool["name"]
         assert tool["name"]

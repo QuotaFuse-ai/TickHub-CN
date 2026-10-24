@@ -1,6 +1,6 @@
 # Tool catalogue
 
-119 canonical tools + 25 aliases = 144 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
+121 canonical tools + 25 aliases = 146 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
 
 TTL is the cache lifetime in seconds; `—` means the alias shares its target's behaviour and the response is not cached separately.
 
@@ -33,8 +33,10 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `eastmoney_financial_all` | `code`, `periods` | 86400 | All three statements plus key indicators for the latest periods. |
 | `eastmoney_financial_report` | `code`, `statement`, `periods`, `report_date` | 86400 | Financial statements (balance / income / cashflow) from Eastmoney datacenter. |
 | `finance_crosscheck` | `code`, `report_date`, `tolerance`, `strict` | 86400 | Cross-check financial statements (assets = liabilities + equity, etc.). |
+| `main_business` | `code`, `periods` | 86400 | Main business breakdown by industry, product and region (Eastmoney F10). |
 | `sina_financial_report` | `code`, `statement`, `periods` | 86400 | Financial statements from Sina (secondary source). |
 | `stock_profile` | `code` | 604800 | Stock profile: name, industry, market cap, float shares, PE/PB. |
+| `top_shareholders` | `code`, `holder_type`, `periods` | 86400 | Top-10 shareholders (total or free-float) with position changes (Eastmoney F10). |
 
 ## Market breadth & pools (`market`)
 
@@ -122,7 +124,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | --- | --- | --- | --- |
 | `index_constituents` | `index_code` | 86400 | Constituent list for a supported mainland index (Eastmoney datacenter). |
 | `index_kline` | `code`, `days` | 60 | Daily K-line for a mainland index (SSE/SZSE/CSI/STAR). |
-| `index_list` | `scope` | 86400 | List mainland indices by market (all / sh / sz / csi / star). |
+| `index_list` | `scope` | 86400 | List mainland indices by market (all / sh / sz / star). |
 | `index_valuation` | `code` | 60 | Index level, turnover and (when published) PE/PB multiples. |
 | `index_weights` | `index_code` | 86400 | Index constituent weights from the Eastmoney component report. |
 | `is_trading_day` | `date` | 604800 | Whether a date is an exchange trading day. |

@@ -61,15 +61,15 @@ def test_admin_requires_token_on_every_route() -> None:
     assert status["ok"] is True
     assert status["auth"] == "token"
     assert status["readonly"] is False
-    assert status["tools"] == 119
-    assert sum(status["layers"].values()) == 119
+    assert status["tools"] == 121
+    assert sum(status["layers"].values()) == 121
 
     bearer = client.get("/api/status", headers={"authorization": f"Bearer {TOKEN}"})
     assert bearer.status_code == 200
 
     tools = client.get("/api/mcp/tools", headers=_headers()).json()
-    assert tools["count"] == 119
-    assert len(tools["tools"]) == 119
+    assert tools["count"] == 121
+    assert len(tools["tools"]) == 121
     quotes = client.get("/api/mcp/tools?layer=quotes", headers=_headers()).json()
     assert len(quotes["tools"]) == 13
 

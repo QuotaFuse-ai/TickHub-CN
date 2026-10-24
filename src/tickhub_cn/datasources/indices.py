@@ -322,7 +322,7 @@ def is_trading_day(date: str = "") -> dict[str, Any]:
 
 @tool(layer="index", ttl="semi_static")
 def index_list(scope: str = "all") -> dict[str, Any]:
-    """List mainland indices by market (all / sh / sz / csi / star)."""
+    """List mainland indices by market (all / sh / sz / star)."""
     key = str(scope or "all").strip().lower()
     fs_map = {
         "all": "m:1+s:2,m:0+s:2",

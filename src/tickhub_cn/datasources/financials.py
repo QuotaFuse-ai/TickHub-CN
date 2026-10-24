@@ -10,7 +10,7 @@ from ..core.http import em_datacenter, em_get, request
 from ..core.ticker import eastmoney_secid, market_of, normalize_code
 from ..validation.financial import crosscheck, normalize_report
 from .base import tool
-from .util import code_or_raise, empty, ok, require_date, to_float
+from .util import code_or_raise, empty, ok, require_date, stock_code, to_float, to_int
 
 _SINA_FINANCE = "https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022"
 _SINA_SOURCES = {"balance": "fzb", "income": "lrb", "cashflow": "llb"}
@@ -52,6 +52,14 @@ _FIN_FIELDS = {
         ("BEGIN_CCE", "beginning_cash"),
     ],
 }
+
+
+_HOLDER_REPORTS = {"total": "RPT_F10_EH_HOLDERS", "float": "RPT_F10_EH_FREEHOLDERS"}
+_MAINOP_TYPES = (("1", "by_industry"), ("2", "by_product"), ("3", "by_region"))
+
+
+def _period_key(row: dict[str, Any], column: str) -> str:
+    return str(row.get(column) or "")[:10]
 
 
 def _pick(row: dict[str, Any], pairs: list[tuple[str, str]]) -> dict[str, Any]:
@@ -195,6 +203,110 @@ def finance_crosscheck(code: str, report_date: str = "", tolerance: float = 0.01
         payload["meta"]["error_code"] = "QFSD-4001"
         payload["meta"]["retryable"] = False
     return payload
+
+
+def _pct(value: Any) -> float | None:
+    """Eastmoney F10 ratios arrive as fractions (0.7018), unlike quote fields."""
+    f = to_float(value)
+    return None if f is None else round(f * 100, 2)
+
+
+@tool("main_business", layer="financials", ttl="semi_static", cache_domain="finance")
+def main_business(code: str, periods: int = 1) -> dict[str, Any]:
+    """Main business breakdown by industry, product and region (Eastmoney F10)."""
+    c = stock_code(code)
+    limit = max(1, min(int(periods or 1), 8))
+    rows = em_datacenter(
+        "RPT_F10_FN_MAINOP",
+        filter_str=f'(SECURITY_CODE="{c}")',
+        page_size=min(500, max(60, limit * 60)),
+        sort_columns="REPORT_DATE,MAINOP_TYPE",
+        sort_types="-1,1",
+    )
+    if not rows:
+        return empty("eastmoney", f"no main-business breakdown for {c}", code=c)
+    dates: list[str] = []
+    for row in rows:
+        date = _period_key(row, "REPORT_DATE")
+        if date and date not in dates:
+            dates.append(date)
+    name = next((row.get("SECURITY_NAME_ABBR") for row in rows if row.get("SECURITY_NAME_ABBR")), None)
+    reports = []
+    for date in dates[:limit]:
+        bucket = [row for row in rows if _period_key(row, "REPORT_DATE") == date]
+        entry: dict[str, Any] = {
+            "report_date": date,
+            "report_name": next((row.get("REPORT_NAME") for row in bucket if row.get("REPORT_NAME")), None),
+        }
+        for type_code, key in _MAINOP_TYPES:
+            items = [row for row in bucket if str(row.get("MAINOP_TYPE") or "") == type_code]
+            if not items:
+                continue
+            items.sort(key=lambda row: to_float(row.get("RANK")) or 0)
+            entry[key] = [
+                {
+                    "item": row.get("ITEM_NAME"),
+                    "revenue": to_float(row.get("MAIN_BUSINESS_INCOME")),
+                    "revenue_ratio": _pct(row.get("MBI_RATIO")),
+                    "cost": to_float(row.get("MAIN_BUSINESS_COST")),
+                    "gross_profit": to_float(row.get("MAIN_BUSINESS_RPOFIT")),
+                    "gross_margin": _pct(row.get("GROSS_RPOFIT_RATIO")),
+                    "rank": to_int(row.get("RANK")),
+                }
+                for row in items
+            ]
+        reports.append(entry)
+    return ok({"code": c, "name": name, "reports": reports}, "eastmoney", extra={"count": len(reports)})
+
+
+@tool("top_shareholders", layer="financials", ttl="semi_static", cache_domain="finance")
+def top_shareholders(code: str, holder_type: str = "total", periods: int = 1) -> dict[str, Any]:
+    """Top-10 shareholders (total or free-float) with position changes (Eastmoney F10)."""
+    c = stock_code(code)
+    kind = str(holder_type or "total").strip().lower()
+    report = _HOLDER_REPORTS.get(kind)
+    if not report:
+        raise TickHubError("QFSD-9001", f"unsupported holder_type: {holder_type} (total/float)")
+    limit = max(1, min(int(periods or 1), 8))
+    rows = em_datacenter(
+        report,
+        filter_str=f'(SECURITY_CODE="{c}")',
+        page_size=min(200, max(10, limit * 10)),
+        sort_columns="END_DATE,HOLDER_RANK",
+        sort_types="-1,1",
+    )
+    if not rows:
+        return empty("eastmoney", f"no top-10 shareholder report for {c}", code=c)
+    dates: list[str] = []
+    for row in rows:
+        date = _period_key(row, "END_DATE")
+        if date and date not in dates:
+            dates.append(date)
+    name = next((row.get("SECURITY_NAME_ABBR") for row in rows if row.get("SECURITY_NAME_ABBR")), None)
+    reports = []
+    for date in dates[:limit]:
+        holders = []
+        for row in (row for row in rows if _period_key(row, "END_DATE") == date):
+            item: dict[str, Any] = {
+                "rank": to_int(row.get("HOLDER_RANK")),
+                "name": row.get("HOLDER_NAME"),
+                "hold_num": to_float(row.get("HOLD_NUM")),
+                "hold_ratio": to_float(row.get("HOLD_NUM_RATIO") if kind == "total" else row.get("HOLD_RATIO")),
+                "change": row.get("HOLD_NUM_CHANGE"),
+                "change_ratio": to_float(row.get("CHANGE_RATIO")),
+                "is_institution": str(row.get("IS_HOLDORG") or "") == "1",
+            }
+            if kind == "float":
+                item["float_ratio"] = to_float(row.get("FREE_HOLDNUM_RATIO"))
+                item["holder_type"] = row.get("HOLDER_TYPE")
+            holders.append(item)
+        holders.sort(key=lambda item: item["rank"] or 0)
+        reports.append({"report_date": date, "holders": holders})
+    return ok(
+        {"code": c, "name": name, "holder_type": kind, "reports": reports},
+        "eastmoney",
+        extra={"count": len(reports)},
+    )
 
 
 @tool("sina_financial_report", layer="financials", ttl="semi_static", cache_domain="finance")
@@ -438,6 +550,8 @@ __all__ = [
     "eastmoney_financial_all",
     "eastmoney_financial_report",
     "finance_crosscheck",
+    "main_business",
     "sina_financial_report",
     "stock_profile",
+    "top_shareholders",
 ]

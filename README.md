@@ -1,7 +1,7 @@
 # TickHub-CN
 
 A-share (mainland China) market data, packaged as structured tools for AI
-agents. TickHub-CN exposes **119 MCP tools** (plus 25 compatibility aliases)
+agents. TickHub-CN exposes **121 MCP tools** (plus 25 compatibility aliases)
 over **MCP stdio** and **MCP Streamable HTTP**, and the same surface over a
 scriptable CLI (`th-cn`).
 
@@ -12,7 +12,7 @@ and labels it with provenance.
 
 ```
 th-cn (CLI)  ─┐
-              ├─► tool registry (119 tools, 14 layers) ─► upstream sources
+              ├─► tool registry (121 tools, 14 layers) ─► upstream sources
 MCP stdio ────┤                                          Eastmoney · Tencent ·
 MCP HTTP  ────┘                                          CNINFO · Sina · exchanges
 ```
