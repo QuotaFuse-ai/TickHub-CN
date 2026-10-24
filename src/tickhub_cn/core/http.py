@@ -178,14 +178,19 @@ def read_health_state(path: str | Path | None = None, *, max_age_s: float = 8640
     return {str(k): v for k, v in sources.items() if isinstance(v, dict)}
 
 
-def _proxy_for(source: str) -> tuple[dict[str, str] | None, Any | None]:
-    """Return ``(proxies, node)``; ``node`` is set only when the pool supplied it."""
+def _proxy_for(
+    source: str, exclude: set[str] | frozenset[str] = frozenset()
+) -> tuple[dict[str, str] | None, Any | None]:
+    """Return ``(proxies, node)``; ``node`` is set only when the pool supplied it.
+
+    ``exclude`` lists node ids that already failed earlier in this request.
+    """
     settings = get_settings()
     try:
         from ..proxy.pool import get_pool
 
         pool = get_pool()
-        node = pool.acquire()
+        node = pool.acquire(exclude)
         if node:
             return node.as_requests_proxy(), node
     except Exception:
@@ -264,10 +269,11 @@ def fetch(
     retries = settings.http_retries if retries is None else retries
     limiter_for(source).acquire()
     last_err: Exception | None = None
+    tried: set[str] = set()
 
     for attempt in range(retries + 1):
         started = time.monotonic()
-        proxies, node = _proxy_for(source)
+        proxies, node = _proxy_for(source, tried)
         try:
             resp = _session_for(source).request(
                 method.upper(),
@@ -297,6 +303,7 @@ def fetch(
             HEALTH.record(source, False, latency, str(exc))
             if node is not None and isinstance(exc, PROXY_FAULTS):
                 _mark_node(node, False)
+                tried.add(node.id)
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 4) + random.uniform(0, 0.3))
                 continue

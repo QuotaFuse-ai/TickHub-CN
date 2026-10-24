@@ -87,16 +87,31 @@ class ProxyPool:
     def __bool__(self) -> bool:
         return bool(self.nodes)
 
-    def acquire(self) -> ProxyNode | None:
+    def acquire(self, exclude: set[str] | frozenset[str] = frozenset()) -> ProxyNode | None:
+        """Round-robin over healthy nodes, skipping ids in ``exclude``.
+
+        ``exclude`` carries the exits that already failed within the current
+        request, so a retry does not land on the same node again. If every
+        healthy node is excluded, an excluded one is reused rather than
+        returning None: going direct would silently bypass the pool.
+        """
         if not self.nodes:
             return None
         with self._lock:
             n = len(self.nodes)
+            fallback: ProxyNode | None = None
             for _ in range(n):
                 node = self.nodes[self._idx % n]
                 self._idx += 1
-                if node.healthy:
-                    return node
+                if not node.healthy:
+                    continue
+                if node.id in exclude:
+                    if fallback is None:
+                        fallback = node
+                    continue
+                return node
+            if fallback is not None:
+                return fallback
         get_logger("proxy").warning("proxy pool exhausted, direct fallback", extra={"error_code": "QFSD-5001"})
         return None
 

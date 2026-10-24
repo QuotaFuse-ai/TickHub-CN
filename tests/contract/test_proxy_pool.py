@@ -52,7 +52,7 @@ class _NoLimit:
 def node_and_pool(monkeypatch):
     pool = _pool("http://127.0.0.1:9")
     node = pool.nodes[0]
-    monkeypatch.setattr(http_mod, "_proxy_for", lambda source: (node.as_requests_proxy(), node))
+    monkeypatch.setattr(http_mod, "_proxy_for", lambda source, exclude=frozenset(): (node.as_requests_proxy(), node))
     monkeypatch.setattr(http_mod, "limiter_for", lambda source: _NoLimit())
     monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
     return node, pool
@@ -110,6 +110,41 @@ def test_http_statuses_are_not_proxy_faults(monkeypatch, node_and_pool, status):
 
     assert node.failures == 0
     assert node.healthy
+
+
+def test_acquire_skips_excluded_nodes_but_reuses_one_when_all_are_tried():
+    pool = _pool("http://127.0.0.1:1", "http://127.0.0.1:2")
+    first, second = pool.nodes
+
+    picked = pool.acquire(exclude={first.id})
+    assert picked is second
+
+    picked = pool.acquire(exclude={first.id, second.id})
+    assert picked in (first, second), "an excluded pool must not silently go direct"
+
+
+def test_retry_skips_the_node_that_just_failed(monkeypatch):
+    pool = _pool("http://127.0.0.1:1", "http://127.0.0.1:2")
+    used: list[dict[str, str]] = []
+
+    class _FlakySession:
+        def request(self, *args, **kwargs):
+            used.append(kwargs["proxies"])
+            if len(used) == 1:
+                raise requests.exceptions.ProxyError("tunnel refused")
+            return _Response(200)
+
+    monkeypatch.setattr(http_mod, "limiter_for", lambda source: _NoLimit())
+    monkeypatch.setattr(http_mod, "_session_for", lambda source: _FlakySession())
+    monkeypatch.setattr(http_mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
+
+    resp = http_mod.fetch("testproxy", "GET", "http://example.invalid/x", retries=1)
+
+    assert resp.status_code == 200
+    assert used[0] != used[1], "retry must not reuse the exit that just failed"
+    assert pool.nodes[0].failures == 1
+    assert pool.nodes[1].failures == 0
 
 
 def test_monitor_probes_every_interval_and_stops():

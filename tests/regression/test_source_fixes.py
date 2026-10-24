@@ -571,6 +571,41 @@ def test_szse_margin_empty_result_names_the_next_day_publication(
     assert "2026-10-22" in out["meta"]["note"]
 
 
+def test_szse_margin_defaults_a_day_earlier_but_keeps_explicit_dates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tickhub_cn.datasources import backups
+
+    monkeypatch.setattr(
+        backups, "last_trading_day", lambda anchor=None: "2026-10-23" if anchor is None else "2026-10-22"
+    )
+    monkeypatch.setattr(backups, "_szse_margin_summary", lambda day: None)
+    seen: list[str] = []
+
+    def szse_rows(day, *_a, **_k):
+        seen.append(day)
+        return [{"zqdm": "000001", "zqjc": "平安银行"}]
+
+    monkeypatch.setattr(backups, "_szse_margin_rows", szse_rows)
+
+    default_out = backups.margin_trading_backup(_no_cache=True)
+    assert seen == ["2026-10-22"], "default SZSE call must start one trading day earlier"
+    assert default_out["data"]["date"] == "2026-10-22"
+    assert "回退" in default_out["meta"]["note"]
+
+    explicit = backups.margin_trading_backup(trade_date="2026-10-21", _no_cache=True)
+    assert seen[-1] == "2026-10-21"
+    assert "note" not in explicit["meta"], "an explicit date is never shifted"
+
+    monkeypatch.setattr(
+        backups,
+        "_sse_margin_rows",
+        lambda day: seen.append(day) or [{"stockCode": "600000", "securityAbbr": "浦发银行"}],
+    )
+    backups.margin_trading_backup(exchange="SSE", _no_cache=True)
+    assert seen[-1] == "2026-10-23", "SSE publishes same-day, so its default stays put"
+
+
 def test_sse_interaction_keeps_the_sites_no_answer_note(monkeypatch: pytest.MonkeyPatch) -> None:
     from tickhub_cn.datasources import irm
 

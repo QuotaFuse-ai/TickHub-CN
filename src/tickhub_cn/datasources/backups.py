@@ -218,9 +218,7 @@ def margin_trading_backup(
     code: str = "",
     max_pages: int = 120,
 ) -> dict[str, Any]:
-    """Exchange-official margin trading table (SSE / SZSE), normalised to 元 and 股."""
-    day = require_date(trade_date or None, last_trading_day())
-    target = code_or_raise(code) if code else ""
+    """Exchange-official margin trading table (SSE / SZSE), normalised to 元 and 股; SZSE publishes T+1, so an implicit date backs off one trading day."""
     key = str(exchange or "SZSE").strip().upper()
     if key in {"SH", "SSE", "SHSE", "上海"}:
         key = "SSE"
@@ -232,6 +230,18 @@ def margin_trading_backup(
         from ..core.errors import TickHubError
 
         raise TickHubError("QFSD-9001", f"invalid exchange: {exchange}", detail={"allowed": ["SSE", "SZSE", "BOTH"]})
+
+    # SZSE publishes T+1, so an implicit "latest session" is still blank during
+    # the session itself: start one trading day earlier instead of returning an
+    # empty table on every default call.
+    backed_off = False
+    default_day = last_trading_day()
+    if not trade_date and key in {"SZSE", "BOTH"}:
+        default_day = last_trading_day(_dt.date.fromisoformat(default_day) - _dt.timedelta(days=1))
+        backed_off = True
+    day = require_date(trade_date or None, default_day)
+    target = code_or_raise(code) if code else ""
+    backoff_note = f"未指定 trade_date：深交所按 T+1 披露，已回退到 {day}" if backed_off else None
 
     sse_part: list[dict[str, Any]] = []
     if key in {"SSE", "BOTH"}:
@@ -279,6 +289,7 @@ def margin_trading_backup(
             },
             "szse",
             extra={"count": len(sz_part)},
+            note=backoff_note,
         )
 
     if not sse_part and not sz_part:
@@ -287,9 +298,11 @@ def margin_trading_backup(
         {"date": day, "exchange": "BOTH", "unit": UNIT_YUAN_SHARE, "sse": sse_part, "szse": sz_part},
         "exchange",
         extra={"count": len(sse_part) + len(sz_part)},
+        note=backoff_note,
     )
     if not sz_part:
-        payload["meta"]["note"] = _szse_lag_note(day)
+        lag = _szse_lag_note(day)
+        payload["meta"]["note"] = f"{backoff_note}；{lag}" if backoff_note else lag
     return payload
 
 
