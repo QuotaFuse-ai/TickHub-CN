@@ -1137,7 +1137,7 @@ pytest -m live
 - [docs/PIP_DISTRIBUTION.md](docs/PIP_DISTRIBUTION.md) —— 打包与发布
 - [docs/MULTI_MODEL_INTEGRATION.md](docs/MULTI_MODEL_INTEGRATION.md) —— 多模型接线与客户端矩阵
 - [skills/tickhub-cn/SKILL.md](skills/tickhub-cn/SKILL.md) —— Agent 技能包
-- [docs/decisions/](docs/decisions/) —— 架构决策记录（ADR）
+- [docs/decisions/](docs/decisions/) —— 架构决策记录（ADR）索引，含历史工单死链说明
 
 ---
 
