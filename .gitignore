@@ -31,3 +31,11 @@ proxy_pool.json
 _pdl/
 .piptest/
 _p*.log
+
+# 本地转档产物（规范文档的 docx/pdf 转换结果），不入库
+/*.docx
+/*.txt
+/*.pdf
+
+# 内部任务记录（含本机路径与网络排查信息），不对外
+docs/tasks/
