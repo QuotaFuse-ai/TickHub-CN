@@ -34,15 +34,63 @@ def _closed() -> dict[str, Any]:
     }
 
 
+# The daily datacenter series: turnover for two sessions, no net buy (the
+# exchange stopped publishing it after 2024-08-16).
+HISTORY = [
+    {
+        "trade_date": "2026-10-23",
+        "channel": "hk2sh",
+        "name": "沪股通",
+        "deal_amount_wan": 15625100.0,
+        "deal_num": 8382898,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-23",
+        "channel": "hk2sz",
+        "name": "深股通",
+        "deal_amount_wan": 15692726.0,
+        "deal_num": 8731057,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-22",
+        "channel": "hk2sh",
+        "name": "沪股通",
+        "deal_amount_wan": 14900000.0,
+        "deal_num": 8000000,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-22",
+        "channel": "hk2sz",
+        "name": "深股通",
+        "deal_amount_wan": 14800000.0,
+        "deal_num": 7900000,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+]
+
+
+def _history() -> dict[str, Any]:
+    return {"ok": True, "data": {"days": HISTORY}, "meta": {"count": len(HISTORY)}}
+
+
 def test_snapshot_is_written_once_and_refreshed_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
     import tickhub_cn.datasources as datasources
 
     monkeypatch.setattr(jobs, "last_trading_day", lambda: "2026-10-23")
     payloads = [_open(1000.0), _open(2000.0)]
 
-    def fake_call(name: str, _params: dict[str, Any] | None = None) -> Any:
+    def fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
         if name != "northbound_flow":
             raise AssertionError(f"unexpected tool call: {name}")
+        if (params or {}).get("history"):
+            return {"ok": True, "data": {"days": []}, "meta": {"count": 0}}
         return payloads.pop(0)
 
     monkeypatch.setattr(datasources, "call_tool", fake_call)
@@ -69,25 +117,82 @@ def test_snapshot_is_written_once_and_refreshed_in_place(monkeypatch: pytest.Mon
     assert rows["hk2sh"]["snapshot_at"]
 
 
-def test_a_closed_session_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_closed_session_writes_no_snapshot_but_still_backfills(monkeypatch: pytest.MonkeyPatch) -> None:
     import tickhub_cn.datasources as datasources
 
     monkeypatch.setattr(jobs, "last_trading_day", lambda: "2026-10-23")
     archive = get_archive()
 
-    monkeypatch.setattr(datasources, "call_tool", lambda *_a, **_k: _open(1000.0))
-    jobs.run_task("northbound", codes="600000")
-    before = archive.northbound()
-    assert len(before) == 4
+    def opening(name: str, params: dict[str, Any] | None = None) -> Any:
+        if (params or {}).get("history"):
+            return {"ok": True, "data": {"days": []}, "meta": {"count": 0}}
+        return _open(1000.0)
 
-    monkeypatch.setattr(datasources, "call_tool", lambda *_a, **_k: _closed())
+    monkeypatch.setattr(datasources, "call_tool", opening)
+    jobs.run_task("northbound", codes="600000")
+    before = archive.northbound(trade_date="2026-10-23")
+    assert len(before) == 4
+    assert all(r["deal_amount_wan"] is None for r in before)
+
+    def closed_call(name: str, params: dict[str, Any] | None = None) -> Any:
+        if name != "northbound_flow":
+            raise AssertionError(f"unexpected tool call: {name}")
+        if (params or {}).get("history"):
+            return _history()
+        return _closed()
+
+    monkeypatch.setattr(datasources, "call_tool", closed_call)
     result = jobs.run_task("northbound", codes="600000")
     assert result["status"] == "ok"
-    assert result["fetched"] == 0
-    assert result["inserted"] == 0
+    # A closed session adds no snapshot, but the daily backfill still lands.
+    assert result["fetched"] == 4
+    assert result["inserted"] == 2
 
-    after = archive.northbound()
+    after = archive.northbound(trade_date="2026-10-23")
     assert [r["net_inflow"] for r in after] == [r["net_inflow"] for r in before]
+    turnover = {r["channel"]: r["deal_amount_wan"] for r in after}
+    assert turnover["hk2sh"] == 15625100.0
+    assert turnover["hk2sz"] == 15692726.0
+    assert turnover["sh2hk"] is None
+
+
+def test_history_backfill_fills_the_table_and_keeps_the_snapshot_net(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tickhub_cn.datasources as datasources
+
+    monkeypatch.setattr(jobs, "last_trading_day", lambda: "2026-10-23")
+
+    def fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
+        if name != "northbound_flow":
+            raise AssertionError(f"unexpected tool call: {name}")
+        if (params or {}).get("history"):
+            return _history()
+        return _open(1000.0)
+
+    monkeypatch.setattr(datasources, "call_tool", fake_call)
+    archive = get_archive()
+
+    result = jobs.run_task("northbound", codes="600000")
+    assert result["status"] == "ok"
+    # 4 snapshot rows + 2 new rows for the prior session; the other two history
+    # rows share their key with the snapshot.
+    assert result["fetched"] == 8
+    assert result["inserted"] == 6
+    assert result["tasks"][0]["detail"]["history"] == {"ok": True, "rows": 4, "days": 2, "inserted": 2}
+
+    rows = {r["channel"]: r for r in archive.northbound(trade_date="2026-10-23")}
+    assert rows["hk2sh"]["net_inflow"] == 1000.0
+    assert rows["hk2sh"]["deal_amount_wan"] == 15625100.0
+    assert rows["hk2sh"]["deal_num"] == 8382898
+    assert rows["hk2sh"]["quota_text"] == "额度充足"
+    assert set(rows["hk2sh"]["source"].split(",")) == {"eastmoney", "eastmoney_datacenter"}
+
+    prior = {r["channel"]: r for r in archive.northbound(trade_date="2026-10-22")}
+    assert prior["hk2sh"]["net_inflow"] is None
+    assert prior["hk2sh"]["deal_amount_wan"] == 14900000.0
+
+    again = jobs.run_task("northbound", codes="600000")
+    assert again["inserted"] == 0
+    assert archive.stats()["northbound_flow"] == 6
 
 
 def test_a_failed_snapshot_is_reported_without_touching_the_archive(monkeypatch: pytest.MonkeyPatch) -> None:

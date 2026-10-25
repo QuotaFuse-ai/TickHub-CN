@@ -20,7 +20,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `tencent_minute` | `code`, `period`, `limit` | 60 | Intraday minute K-line (1/5/15/30/60 minutes) from Tencent. |
 | `tencent_quote` | `codes` | 60 | Realtime A-share quote from Tencent (price, PE, PB, turnover, caps). |
 | `tencent_quote_batch` | `codes`, `max_codes` | 60 | Batch realtime quotes with partial-failure reporting. |
-| `tencent_ticks` | `code`, `page` | 60 | Tick-by-tick trades for the latest session (Tencent, no BSE). |
+| `tencent_ticks` | `code`, `page`, `full` | 60 | Tick-by-tick trades (pages start at 0, 70 prints each); `full=true` walks every page and reconciles summed turnover with the daily quote in `meta.completeness` (post-close gate, `complete=null` while the session is open). |
 
 ## Financials (`financials`)
 
@@ -29,7 +29,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `baostock_st_list` | — | 604800 | Historical ST / *ST records (baostock). |
 | `baostock_stock_basic` | `code` | 604800 | Listing / delisting dates and status (baostock). |
 | `baostock_valuation_history` | `code`, `start`, `end` | 604800 | Historical PE/PB/PS/PCF and turnover (baostock, no BSE). |
-| `cninfo_financial_notes` | `code`, `year`, `limit` | 86400 | Locate annual and audit reports that carry the financial-statement notes (CNINFO PDFs). |
+| `cninfo_financial_notes` | `code`, `year`, `limit`, `extract`, `chars` | 86400 | Locate annual and audit reports that carry the financial-statement notes (CNINFO PDFs); extract=true also parses the newest annual-report PDF and returns the 「财务报表附注」 section as data.notes.text (pypdf extra `notes`, pdftotext fallback, locator kept on failure). |
 | `eastmoney_finance_indicators` | `code`, `periods` | 86400 | Key financial indicators (EPS, BPS, revenue, net profit, ROE). |
 | `eastmoney_financial_all` | `code`, `periods` | 86400 | All three statements plus key indicators for the latest periods. |
 | `eastmoney_financial_report` | `code`, `statement`, `periods`, `report_date` | 86400 | Financial statements (balance / income / cashflow) from Eastmoney datacenter. |
@@ -85,7 +85,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `margin_detail` | `code`, `page_size` | 86400 | Per-stock margin financing (融资融券) history. |
 | `margin_market` | `days` | 86400 | Market-wide margin balance history. |
 | `margin_trading_backup` | `trade_date`, `exchange`, `code`, `max_pages` | 86400 | Exchange-official margin trading table (SSE / SZSE), normalised to 元 and 股; SZSE publishes T+1, so an implicit date backs off one trading day. |
-| `northbound_flow` | — | 60 | Northbound / southbound intraday net flow (empty outside the session). |
+| `northbound_flow` | `history`, `days` | 60 | Northbound / southbound intraday net flow (empty outside the session); `history=true` returns the daily turnover series (成交额/成交笔数) instead — net buy has not been published since 2024-08-19. |
 | `realtime_fund_flow` | `code` | 60 | Realtime snapshot of one stock's main-capital flow. |
 | `stock_fund_flow` | `code`, `days` | 60 | Daily main/small/medium/large/super-large net inflow for one stock. |
 

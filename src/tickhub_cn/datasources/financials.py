@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import datetime as _dt
+import io
 import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import TickHubError
-from ..core.http import em_datacenter, em_get, request
+from ..core.http import em_datacenter, em_get, fetch, request
 from ..core.ticker import eastmoney_secid, market_of, normalize_code
 from ..validation.financial import crosscheck, normalize_report
 from .base import tool
@@ -543,8 +548,125 @@ def baostock_st_list() -> dict[str, Any]:
         bs.logout()
 
 
+_PDF_MAX_PAGES = 400
+# Most specific first: the audit report also says 「财务报表附注」, while the
+# notes chapter itself is headed 「合并财务报表项目注释」 in most annual reports.
+_NOTES_HEADINGS = ("合并财务报表项目注释", "财务报表项目注释", "财务报表附注", "财务报告")
+
+
+def _pdf_pages(blob: bytes) -> tuple[list[str], str]:
+    """Page texts for a PDF blob, plus the engine that produced them."""
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError:
+        PdfReader = None  # noqa: N806 - mirrors the optional import
+    if PdfReader is not None:
+        reader = PdfReader(io.BytesIO(blob))
+        pages: list[str] = []
+        for page in reader.pages[:_PDF_MAX_PAGES]:
+            try:
+                pages.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001 - one broken page must not sink the report
+                pages.append("")
+        return pages, "pypdf"
+    exe = shutil.which("pdftotext")
+    if not exe:
+        raise TickHubError(
+            "QFSD-9006",
+            "PDF 正文解析需要 pypdf（pip install 'tickhub-cn[notes]'）或系统 pdftotext",
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "report.pdf"
+        src.write_bytes(blob)
+        out = Path(tmp) / "report.txt"
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [exe, "-layout", "-f", "1", "-l", str(_PDF_MAX_PAGES), str(src), str(out)],
+            capture_output=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "ignore").strip()[:200]
+            raise TickHubError("QFSD-9006", f"pdftotext 解析失败: {detail}")
+        text = out.read_text("utf-8", errors="ignore")
+    return text.split("\f"), "pdftotext"
+
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _text_layer_readable(pages: list[str]) -> bool:
+    """False when the PDF's fonts carry no Unicode map.
+
+    Annual reports typeset with a legacy Adobe-GB1 CID font extract as pages of
+    Latin/Hangul code points instead of Chinese, whichever engine reads them.
+    """
+    text = "".join(pages)
+    if len(text) < 2000:
+        return True
+    return len(_CJK_RE.findall(text)) / len(text) >= 0.02
+
+
+def _notes_excerpt(pages: list[str], chars: int) -> dict[str, Any]:
+    """Locate the notes section and cut ``chars`` characters from its start.
+
+    Annual reports list the notes in the table of contents long before the
+    section itself, so hits in the first third of the file are skipped when a
+    later one exists.
+    """
+    total = len(pages)
+    floor = max(3, total // 3)
+    for heading in _NOTES_HEADINGS:
+        hits = [i for i, text in enumerate(pages) if heading in text]
+        if not hits:
+            continue
+        after_toc = [i for i in hits if i >= floor] or hits
+        # A page that *opens* with the heading is the chapter itself; a hit deep
+        # inside a page is usually a cross-reference (the audit report cites the
+        # notes chapter well before it starts).
+        top = [i for i in after_toc if pages[i].find(heading) <= max(80, len(pages[i]) // 7)]
+        start = top[0] if top else after_toc[0]
+        body = "\n".join(pages[start:]).strip()
+        return {
+            "found": True,
+            "heading": heading,
+            "start_page": start + 1,
+            "text": body[:chars],
+            "truncated": len(body) > chars,
+        }
+    return {"found": False, "reason": "报告正文中未出现财务报表附注章节标题"}
+
+
+def _extract_notes(report: dict[str, Any], chars: int) -> tuple[dict[str, Any], str | None]:
+    """Fetch one annual-report PDF and pull its notes section.
+
+    Returns ``(notes, failure)``; a failure keeps the locator envelope intact.
+    """
+    url = str(report.get("pdf") or report.get("url") or "")
+    if not url:
+        return {"found": False, "reason": "该报告没有可下载的 PDF 链接"}, "该报告没有可下载的 PDF 链接"
+    try:
+        blob = fetch("cninfo", "GET", url).content
+        pages, engine = _pdf_pages(blob)
+    except TickHubError as exc:
+        return {"found": False, "reason": str(exc)}, str(exc)
+    except Exception as exc:  # noqa: BLE001 - extraction is an add-on, never fatal
+        reason = f"PDF 正文解析失败: {exc}"[:200]
+        return {"found": False, "reason": reason}, reason
+    where = {"url": url, "title": report.get("title"), "engine": engine, "pages": len(pages)}
+    if not _text_layer_readable(pages):
+        reason = (
+            "年报 PDF 的字体缺少 Unicode 映射（多为 Adobe-GB1 旧编码），"
+            "解析出的中文不可读；请直接打开 PDF 查阅附注"
+        )
+        return {**where, "found": False, "unreadable": True, "reason": reason}, reason
+    excerpt = _notes_excerpt(pages, chars)
+    return {**where, **excerpt}, None
+
+
 @tool(layer="financials", ttl="semi_static", cache_domain="financial_notes")
-def cninfo_financial_notes(code: str, year: str = "", limit: int = 5) -> dict[str, Any]:
+def cninfo_financial_notes(
+    code: str, year: str = "", limit: int = 5, extract: bool = False, chars: int = 8000
+) -> dict[str, Any]:
     """Locate annual and audit reports that carry the financial-statement notes (CNINFO PDFs)."""
     from .announcements import _cninfo_rows
 
@@ -579,14 +701,26 @@ def cninfo_financial_notes(code: str, year: str = "", limit: int = 5) -> dict[st
         scope = f"{year_text} 年度" if year_text else "最近年度"
         return empty("cninfo", f"{c} 未找到{scope}报告，无法定位财务报表附注")
 
-    return ok(
-        {"code": c, "year": year_text or None, "reports": reports, "audit_reports": audit[:3]},
-        "cninfo",
-        extra={
-            "count": len(reports),
-            "note": "财务报表附注随年度报告 PDF 一并发布，巨潮资讯不提供附注正文的独立接口；请打开年度报告 PDF 查阅附注。",
-        },
-    )
+    payload: dict[str, Any] = {"code": c, "year": year_text or None, "reports": reports, "audit_reports": audit[:3]}
+    extra: dict[str, Any] = {
+        "count": len(reports),
+        "note": "财务报表附注随年度报告 PDF 一并发布，巨潮资讯不提供附注正文的独立接口；请打开年度报告 PDF 查阅附注。",
+    }
+    if extract:
+        notes, failure = _extract_notes(reports[0], max(500, int(chars or 8000)))
+        payload["notes"] = notes
+        if failure:
+            extra["degraded"] = "notes_text_layer_unreadable" if notes.get("unreadable") else "notes_extract_failed"
+            extra["note"] = f"{failure}；已回落到 PDF 定位结果。"
+        elif notes.get("found"):
+            extra["note"] = (
+                f"附注正文自年报 PDF 第 {notes['start_page']} 页（「{notes['heading']}」标题命中页）起摘录，"
+                "按页拼接、未做表格还原；命中页也可能是引用该章节的审计报告页。"
+            )
+        else:
+            extra["degraded"] = "notes_not_found"
+            extra["note"] = f"{notes.get('reason')}；已回落到 PDF 定位结果。"
+    return ok(payload, "cninfo", extra=extra)
 
 
 __all__ = [

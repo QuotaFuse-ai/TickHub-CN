@@ -26,6 +26,7 @@ TASKS = ("announcements", "reports", "risks", "northbound")
 DEFAULT_INDEX = "000300"
 DEDUPE_TTL = 7 * 24 * 3600
 PAGE_LIMIT = 50
+NORTHBOUND_BACKFILL_DAYS = 60
 
 Progress = Callable[[dict[str, Any]], None]
 StopCheck = Callable[[], bool]
@@ -287,13 +288,40 @@ def crawl_reports(
     return result
 
 
+def _backfill_northbound_history(archive: Any, *, days: int = NORTHBOUND_BACKFILL_DAYS) -> dict[str, Any]:
+    """Write the datacenter's daily northbound turnover series into the archive.
+
+    The 15:05 snapshot only ever owns today's row, so a fresh install shows an
+    empty table until the next session. The datacenter report shares the
+    ``(trade_date, channel)`` key with the snapshot, so one backfill fills the
+    table immediately and a later snapshot only adds the net inflow on top.
+    """
+    try:
+        payload = _call("northbound_flow", history=True, days=days)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300], "rows": 0, "days": 0, "inserted": 0}
+
+    rows = _rows(payload, "days")
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        day = str(row.get("trade_date") or "")
+        if day:
+            grouped.setdefault(day, []).append(row)
+    inserted = 0
+    for day, day_rows in grouped.items():
+        inserted += archive.insert_northbound(day_rows, trade_date=day, source="eastmoney_datacenter")
+    return {"ok": True, "rows": len(rows), "days": len(grouped), "inserted": inserted}
+
+
 def crawl_northbound(*, progress: Progress | None = None, should_stop: StopCheck | None = None) -> TaskResult:
-    """Snapshot the northbound/southbound flow once per trading day.
+    """Snapshot the northbound/southbound flow and backfill the daily series.
 
     The trade date comes from weekday arithmetic, not from the calendar tool:
     the calendar itself calls push2, which is exactly what this snapshot is
-    meant to spare later readers. A closed session writes nothing, otherwise a
-    weekend run would overwrite the last trading day's real numbers.
+    meant to spare later readers. A closed session writes no snapshot, otherwise
+    a weekend run would overwrite the last trading day's real numbers. The
+    datacenter backfill is independent of the session state — it is how the
+    table gets real history on a fresh install and today's turnover after close.
     """
     archive = get_archive()
     result = TaskResult(task="northbound")
@@ -304,37 +332,52 @@ def crawl_northbound(*, progress: Progress | None = None, should_stop: StopCheck
 
     trade_date = last_trading_day()
     result.detail["trade_date"] = trade_date
+    result.detail["cancelled"] = False
+
+    snapshot_error = ""
     try:
         payload = _call("northbound_flow")
     except Exception as exc:
-        result.failed.append("northbound")
-        result.errors["northbound"] = str(exc)[:300]
-        result.status = "failed"
-        result.detail["cancelled"] = False
-        return result
-
+        snapshot_error = str(exc)[:300]
+        payload = {}
     rows = _rows(payload, "channels")
     meta = payload.get("meta") if isinstance(payload, dict) else {}
     result.fetched = len(rows)
-    result.detail["cancelled"] = False
-    if not rows:
+    if rows:
+        result.inserted = archive.insert_northbound(
+            rows,
+            trade_date=trade_date,
+            snapshot_at=now_shanghai().strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+        result.detail["stored"] = True
+    else:
         result.detail.update(
             {
                 "stored": False,
                 "closed": bool((meta or {}).get("closed")),
-                "note": (meta or {}).get("note") or "northbound returned no channel data",
+                "note": snapshot_error
+                or (meta or {}).get("note")
+                or "northbound returned no channel data",
             }
         )
+
+    if should_stop is not None and should_stop():
+        result.status = "cancelled"
+        result.detail["cancelled"] = True
         return result
 
-    result.inserted = archive.insert_northbound(
-        rows,
-        trade_date=trade_date,
-        snapshot_at=now_shanghai().strftime("%Y-%m-%dT%H:%M:%S"),
-    )
-    result.detail["stored"] = True
+    history = _backfill_northbound_history(archive)
+    result.detail["history"] = history
+    result.fetched += history["rows"]
+    result.inserted += history["inserted"]
+
+    if snapshot_error:
+        result.failed.append("northbound")
+        result.errors["northbound"] = snapshot_error
+        # The daily series still landed, so only the live sampling failed.
+        result.status = "partial" if history["ok"] else "failed"
     if progress:
-        progress({"task": "northbound", "fetched": len(rows), "inserted": result.inserted})
+        progress({"task": "northbound", "fetched": result.fetched, "inserted": result.inserted})
     return result
 
 

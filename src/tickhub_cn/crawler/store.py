@@ -58,7 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_risk_code ON risk_event(code, event_date DESC);
 CREATE TABLE IF NOT EXISTS northbound_flow (
     item_id TEXT PRIMARY KEY, trade_date TEXT, channel TEXT, name TEXT,
     net_inflow REAL, net_inflow_wan REAL, status INTEGER, source TEXT,
-    snapshot_at TEXT, payload TEXT
+    snapshot_at TEXT, payload TEXT,
+    deal_amount_wan REAL, deal_num INTEGER, quota_text TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_northbound_date ON northbound_flow(trade_date DESC, channel);
 CREATE TABLE IF NOT EXISTS crawl_task (
@@ -87,6 +88,17 @@ ITEM_FIELDS = ("id", "announcementId", "info_code", "infoCode", "art_code", "ann
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+# Columns added after the first release. ``CREATE TABLE IF NOT EXISTS`` never
+# touches an existing file, so each one is added in place on open.
+_MIGRATIONS = {
+    "northbound_flow": (
+        ("deal_amount_wan", "REAL"),
+        ("deal_num", "INTEGER"),
+        ("quota_text", "TEXT"),
+    ),
+}
 
 
 def _item_id(source: str, row: dict[str, Any], *fallback: Any) -> str:
@@ -119,6 +131,11 @@ class Archive:
     def _ensure(self) -> None:
         with self._lock, self.connect() as con:
             con.executescript(SCHEMA)
+            for table, columns in _MIGRATIONS.items():
+                have = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
+                for name, kind in columns:
+                    if name not in have:
+                        con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     # ----------------------------------------------------------------- writes
 
@@ -212,43 +229,73 @@ class Archive:
     ) -> int:
         """Upsert one channel snapshot; returns how many rows were new.
 
-        Repeated samples on the same day overwrite the row so the latest one
-        (closest to the close) becomes that day's value.
+        A row is identified by (trade_date, channel), so the intraday snapshot
+        and the datacenter history backfill for the same day enrich each other
+        instead of producing duplicates: the snapshot supplies the net inflow,
+        the history supplies turnover and trade count. A later value only
+        replaces a column when it is not null, which keeps a backfill from
+        wiping the close-of-day flow (and vice versa).
         """
         inserted = 0
-        stamp = snapshot_at or _now()
         with self._lock, self.connect() as con:
             for row in rows or []:
                 channel = str(row.get("channel") or "")
-                if not channel:
+                day = str(row.get("trade_date") or trade_date or "")
+                if not channel or not day:
                     continue
-                item_id = f"{source}:{trade_date}:{channel}"
-                exists = con.execute(
-                    "SELECT 1 FROM northbound_flow WHERE item_id=?", (item_id,)
+                item_id = f"eastmoney:{day}:{channel}"
+                existing = con.execute(
+                    "SELECT source, payload FROM northbound_flow WHERE item_id=?", (item_id,)
                 ).fetchone()
+                sources = [s for s in str((existing["source"] if existing else "") or "").split(",") if s]
+                if source not in sources:
+                    sources.append(source)
+                merged: dict[str, Any] = {}
+                if existing:
+                    try:
+                        old = json.loads(existing["payload"] or "{}")
+                    except (TypeError, ValueError):
+                        old = {}
+                    if isinstance(old, dict):
+                        merged.update(old)
+                merged.update({k: v for k, v in row.items() if v is not None})
+                merged["channel"] = channel
+                merged["name"] = str(row.get("name") or merged.get("name") or "")
+                merged["trade_date"] = day
                 con.execute(
                     "INSERT INTO northbound_flow"
                     " (item_id, trade_date, channel, name, net_inflow, net_inflow_wan, status,"
-                    "  source, snapshot_at, payload)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?)"
+                    "  source, snapshot_at, payload, deal_amount_wan, deal_num, quota_text)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
                     " ON CONFLICT(item_id) DO UPDATE SET"
-                    "  name=excluded.name, net_inflow=excluded.net_inflow,"
-                    "  net_inflow_wan=excluded.net_inflow_wan, status=excluded.status,"
-                    "  snapshot_at=excluded.snapshot_at, payload=excluded.payload",
+                    "  name=COALESCE(NULLIF(excluded.name, ''), northbound_flow.name),"
+                    "  net_inflow=COALESCE(excluded.net_inflow, northbound_flow.net_inflow),"
+                    "  net_inflow_wan=COALESCE(excluded.net_inflow_wan, northbound_flow.net_inflow_wan),"
+                    "  status=COALESCE(excluded.status, northbound_flow.status),"
+                    "  deal_amount_wan=COALESCE(excluded.deal_amount_wan, northbound_flow.deal_amount_wan),"
+                    "  deal_num=COALESCE(excluded.deal_num, northbound_flow.deal_num),"
+                    "  quota_text=COALESCE(NULLIF(excluded.quota_text, ''), northbound_flow.quota_text),"
+                    "  source=excluded.source,"
+                    "  snapshot_at=CASE WHEN excluded.snapshot_at <> ''"
+                    "    THEN excluded.snapshot_at ELSE northbound_flow.snapshot_at END,"
+                    "  payload=excluded.payload",
                     (
                         item_id,
-                        trade_date,
+                        day,
                         channel,
-                        str(row.get("name") or ""),
+                        merged["name"],
                         row.get("net_inflow"),
                         row.get("net_inflow_wan"),
                         row.get("status"),
-                        source,
-                        stamp,
-                        json.dumps(row, ensure_ascii=False, default=str),
+                        ",".join(sources),
+                        snapshot_at or str(row.get("snapshot_at") or ""),
+                        json.dumps(merged, ensure_ascii=False, default=str),
+                        row.get("deal_amount_wan"),
+                        row.get("deal_num"),
+                        row.get("quota_text"),
                     ),
                 )
-                inserted += int(exists is None)
+                inserted += int(existing is None)
         return inserted
 
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:

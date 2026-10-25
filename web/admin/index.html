@@ -392,6 +392,10 @@ const DEGRADED_LABELS = {
   stale_cache: "上游限流或熔断，返回最近一次成功结果",
   tdx_package_stale: "盘后包未覆盖所请求的交易日",
   tdx_package_missing: "部分市场盘后包缺失",
+  ticks_incomplete: "逐笔分页成交额与当日成交额不符，可能有缺页",
+  notes_extract_failed: "附注正文解析失败，仅返回 PDF 定位",
+  notes_text_layer_unreadable: "年报 PDF 中文无法还原（旧编码字体），仅返回 PDF 定位",
+  notes_not_found: "报告正文中未定位到附注章节，仅返回 PDF 定位",
 };
 
 function metaBanner(payload) {
@@ -1368,22 +1372,37 @@ views.northbound = async () => {
   const dates = [...new Set(rows.map((r) => r.trade_date).filter(Boolean))].sort().reverse();
   const date = dates.includes(state.nbDate) ? state.nbDate : (dates[0] || "");
   const day = rows.filter((r) => r.trade_date === date);
-  const yi = (value) => Math.round((Number(value) || 0) / 1e6) / 100;
-  const total = (channels) => yi(day
-    .filter((r) => channels.includes(r.channel))
-    .reduce((sum, r) => sum + (Number(r.net_inflow) || 0), 0));
+  // Stored amounts are 万元; the cards report 亿元. Null stays empty rather
+  // than becoming 0, because the exchange stopped publishing daily net buy.
+  const yi = (value) => (value == null ? "—" : Math.round((Number(value) || 0) / 1e6) / 100);
+  const yiWan = (value) => (value == null ? "—" : Math.round((Number(value) || 0) / 100) / 100);
+  const sum = (channels, field) => day
+    .filter((r) => channels.includes(r.channel) && r[field] != null)
+    .reduce((acc, r) => acc + (Number(r[field]) || 0), 0);
+  const hasNet = (channels) => day.some((r) => channels.includes(r.channel) && r.net_inflow != null);
+  const hasDeal = day.some((r) => r.deal_amount_wan != null);
   const detail = day.map((r) => ({
     "通道": r.name || r.channel,
+    "成交额(亿)": yiWan(r.deal_amount_wan),
+    "成交笔数": r.deal_num == null ? "" : r.deal_num,
     "净流入(亿)": yi(r.net_inflow),
     "净流入(万元)": r.net_inflow_wan == null ? "" : Math.round(Number(r.net_inflow_wan) * 100) / 100,
+    "额度": esc(r.quota_text || ""),
     "状态": r.status,
-    "快照时间": fmtStamp(r.snapshot_at),
     "来源": r.source,
   }));
+  const detailCols = ["通道", "成交额(亿)", "成交笔数", "净流入(亿)", "净流入(万元)", "额度", "状态", "来源"];
   return `
     <h2>北向资金</h2>
     <p class="sub">来自归档表 <code>northbound_flow</code>：抓取任务 <code>northbound</code> 每个交易日按通道快照一次，
-      同日重跑只刷新数值；休市日不写入，避免覆盖上一交易日的真实数据。</p>
+      同日重跑只刷新数值；休市日不写快照，避免覆盖上一交易日的真实数据。
+      同一任务还会回补东财数据中心最近 60 个交易日的成交额与成交笔数，两者按
+      <code>(trade_date, channel)</code> 合并成一行。</p>
+    <p class="sub">注：交易所自 2024-08-19 起停止披露当日净买额，回补行因此只有成交数据，净流入显示为
+      <code>—</code>，没有用 0 填充。</p>
+    ${rows.length ? "" : `
+    <p class="sub">归档表还没有北向数据。任务 <code>northbound</code> 每个交易日 15:05 落当日通道快照，
+      并会一并回补最近 60 个交易日的成交额；需要立即填充可到「抓取任务」页运行一次 <code>northbound</code>。</p>`}
     <div class="row">
       <label>交易日
         <select id="nb-date">${dates.length
@@ -1394,21 +1413,24 @@ views.northbound = async () => {
     </div>
     ${cards([
       ["交易日", date || "—"],
-      ["北向合计(亿)", total(["hk2sh", "hk2sz"])],
-      ["南向合计(亿)", total(["sh2hk", "sz2hk"])],
+      ["北向净流入(亿)", hasNet(["hk2sh", "hk2sz"]) ? yi(sum(["hk2sh", "hk2sz"], "net_inflow")) : "—"],
+      ["南向净流入(亿)", hasNet(["sh2hk", "sz2hk"]) ? yi(sum(["sh2hk", "sz2hk"], "net_inflow")) : "—"],
+      ["北向成交额(亿)", hasDeal ? yiWan(sum(["hk2sh", "hk2sz"], "deal_amount_wan")) : "—"],
       ["当日通道", day.length],
     ])}
     <h3>当日通道明细</h3>
-    ${table(detail, ["通道", "净流入(亿)", "净流入(万元)", "状态", "快照时间", "来源"])}
+    ${table(detail, detailCols)}
     <h3>全部快照</h3>
     <p class="sub">最近 ${rows.length} 条（上限 500），按交易日与通道排序。</p>
     ${table(rows.map((r) => ({
       "交易日": r.trade_date,
       "通道": r.name || r.channel,
+      "成交额(亿)": yiWan(r.deal_amount_wan),
+      "成交笔数": r.deal_num == null ? "" : r.deal_num,
       "净流入(亿)": yi(r.net_inflow),
       "状态": r.status,
       "快照时间": fmtStamp(r.snapshot_at),
-    })), ["交易日", "通道", "净流入(亿)", "状态", "快照时间"])}`;
+    })), ["交易日", "通道", "成交额(亿)", "成交笔数", "净流入(亿)", "状态", "快照时间"])}`;
 };
 
 views.logs = async () => {

@@ -34,6 +34,48 @@ NORTHBOUND = [
     {"channel": "sz2hk", "name": "港股通(深)", "net_inflow": 0.0, "net_inflow_wan": 0.0, "status": 1},
 ]
 
+# The daily series shares (trade_date, channel) with the snapshot: 2026-10-23
+# is last_trading_day() on the frozen clock, so those two rows enrich the
+# snapshot above instead of adding new ones.
+NORTHBOUND_HISTORY = [
+    {
+        "trade_date": "2026-10-23",
+        "channel": "hk2sh",
+        "name": "沪股通",
+        "deal_amount_wan": 15625100.0,
+        "deal_num": 8382898,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-23",
+        "channel": "hk2sz",
+        "name": "深股通",
+        "deal_amount_wan": 15692726.0,
+        "deal_num": 8731057,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-22",
+        "channel": "hk2sh",
+        "name": "沪股通",
+        "deal_amount_wan": 14900000.0,
+        "deal_num": 8000000,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+    {
+        "trade_date": "2026-10-22",
+        "channel": "hk2sz",
+        "name": "深股通",
+        "deal_amount_wan": 14800000.0,
+        "deal_num": 7900000,
+        "net_inflow": None,
+        "quota_text": "额度充足",
+    },
+]
+
 
 def _fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
     params = params or {}
@@ -47,14 +89,18 @@ def _fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
     if name == "eastmoney_reports":
         return {"ok": True, "data": {"reports": REPORTS.get(code, [])}}
     if name == "northbound_flow":
+        if params.get("history"):
+            return {"ok": True, "data": {"days": NORTHBOUND_HISTORY}, "meta": {"count": len(NORTHBOUND_HISTORY)}}
         return {"ok": True, "data": {"channels": NORTHBOUND}, "meta": {"count": len(NORTHBOUND)}}
     raise AssertionError(f"unexpected tool call: {name}")
 
 
 def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPatch) -> None:
     import tickhub_cn.datasources as datasources
+    from tickhub_cn.crawler import jobs
 
     monkeypatch.setattr(datasources, "call_tool", _fake_call)
+    monkeypatch.setattr(jobs, "last_trading_day", lambda: "2026-10-23")
     archive = get_archive()
 
     first = run_task("all", codes="600000,000001", days=3)
@@ -68,10 +114,12 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     assert by_task["reports"]["fetched"] == 2
     # The risk pass reads the archive, so it sees all three stored announcements.
     assert by_task["risks"]["fetched"] == 3
-    # Northbound is not per-code: one snapshot covers all four channels.
-    assert by_task["northbound"]["fetched"] == 4
-    assert by_task["northbound"]["inserted"] == 4
-    assert first["fetched"] == 12
+    # Northbound is not per-code: one snapshot covers all four channels, and
+    # the daily backfill adds two turnover rows for the prior session.
+    assert by_task["northbound"]["fetched"] == 8
+    assert by_task["northbound"]["inserted"] == 6
+    assert by_task["northbound"]["detail"]["history"] == {"ok": True, "rows": 4, "days": 2, "inserted": 2}
+    assert first["fetched"] == 16
     assert first["inserted"] >= 5
 
     stats = archive.stats()
@@ -79,12 +127,23 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     assert stats["research_report"] == 2
     # "回购" and "减持" both classify into risk events; the third title does not.
     assert stats["risk_event"] == 2
-    assert stats["northbound_flow"] == 4
+    assert stats["northbound_flow"] == 6
 
     rows = archive.announcements(code="600000", limit=10)
     assert {r["title"] for r in rows} == {"关于回购公司股份的公告", "2026年第三季度报告"}
     sources = {r["code"]: r["source"] for r in archive.announcements(limit=10)}
     assert sources == {"600000": "cninfo", "000001": "szse"}
+
+    # The snapshot and the backfill enrich one row instead of duplicating it.
+    today = {r["channel"]: r for r in archive.northbound(trade_date="2026-10-23")}
+    assert today["hk2sh"]["net_inflow"] == 123456789.0
+    assert today["hk2sh"]["deal_amount_wan"] == 15625100.0
+    assert set(today["hk2sh"]["source"].split(",")) == {"eastmoney", "eastmoney_datacenter"}
+    prior = archive.northbound(trade_date="2026-10-22")
+    assert len(prior) == 2
+    # Net buy is no longer published upstream; turnover still is.
+    assert all(r["net_inflow"] is None for r in prior)
+    assert all(r["deal_amount_wan"] for r in prior)
 
     second = run_task("all", codes="600000,000001", days=3)
     assert second["status"] == "ok"
@@ -95,16 +154,16 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
             continue
         assert task["skipped"] == task["fetched"]
     # Northbound dedupes by (trade_date, channel) through an upsert, so the
-    # second run refreshes the snapshot without growing the table.
+    # second run refreshes the snapshot and the backfill without growing the table.
     second_nb = {t["task"]: t for t in second["tasks"]}["northbound"]
-    assert second_nb["fetched"] == 4
+    assert second_nb["fetched"] == 8
     assert second_nb["inserted"] == 0
 
     again = archive.stats()
     assert again["announcement"] == stats["announcement"]
     assert again["research_report"] == stats["research_report"]
     assert again["risk_event"] == stats["risk_event"]
-    assert again["northbound_flow"] == 4
+    assert again["northbound_flow"] == 6
     assert again["crawl_task"] == stats["crawl_task"] + 1
 
     last = archive.last_task()
@@ -119,3 +178,42 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     cached = archive_announcements("600000", limit=5)
     assert cached
     assert {r["title"] for r in cached} == {r["title"] for r in rows}
+
+
+def test_opening_an_old_archive_adds_the_turnover_columns(tmp_path) -> None:
+    import sqlite3
+
+    from tickhub_cn.crawler.store import Archive
+
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE northbound_flow ("
+        " item_id TEXT PRIMARY KEY, trade_date TEXT, channel TEXT, name TEXT,"
+        " net_inflow REAL, net_inflow_wan REAL, status INTEGER, source TEXT,"
+        " snapshot_at TEXT, payload TEXT);"
+        "INSERT INTO northbound_flow (item_id, trade_date, channel, name, net_inflow)"
+        " VALUES ('eastmoney:2026-10-23:hk2sh', '2026-10-23', 'hk2sh', '沪股通', 1000.0);"
+    )
+    con.commit()
+    con.close()
+
+    archive = Archive(path)
+    archive.insert_northbound(
+        [
+            {
+                "trade_date": "2026-10-23",
+                "channel": "hk2sh",
+                "deal_amount_wan": 15625100.0,
+                "deal_num": 8382898,
+                "quota_text": "额度充足",
+            }
+        ],
+        trade_date="2026-10-23",
+        source="eastmoney_datacenter",
+    )
+    row = archive.northbound(trade_date="2026-10-23")[0]
+    assert row["net_inflow"] == 1000.0
+    assert row["deal_amount_wan"] == 15625100.0
+    assert row["deal_num"] == 8382898
+    assert row["quota_text"] == "额度充足"

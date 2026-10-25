@@ -74,7 +74,7 @@ def test_page_sends_the_admin_token_header() -> None:
     assert "sessionStorage" in html
 
 
-def test_archive_northbound_route_serves_snapshot_rows() -> None:
+def test_archive_northbound_route_serves_snapshot_and_backfill_columns() -> None:
     from tickhub_cn.crawler.store import get_archive
 
     get_archive().insert_northbound(
@@ -83,16 +83,27 @@ def test_archive_northbound_route_serves_snapshot_rows() -> None:
         trade_date="2026-10-23",
         snapshot_at="2026-10-23T15:05:00",
     )
+    get_archive().insert_northbound(
+        [{"trade_date": "2026-10-22", "channel": "hk2sh", "name": "沪股通",
+          "deal_amount_wan": 15625100.0, "deal_num": 8382898, "quota_text": "额度充足"}],
+        trade_date="2026-10-22",
+        source="eastmoney_datacenter",
+    )
     client = _client()
     assert client.get("/api/archive/northbound").status_code == 401
 
     headers = {"x-admin-token": "t0ken"}
     body = client.get("/api/archive/northbound", headers=headers).json()
-    assert body["count"] == 1
-    row = body["rows"][0]
-    assert (row["trade_date"], row["channel"], row["net_inflow"]) == ("2026-10-23", "hk2sh", 123456789.0)
+    assert body["count"] == 2
+    by_date = {row["trade_date"]: row for row in body["rows"]}
+    assert (by_date["2026-10-23"]["channel"], by_date["2026-10-23"]["net_inflow"]) == ("hk2sh", 123456789.0)
+    backfill = by_date["2026-10-22"]
+    assert backfill["deal_amount_wan"] == 15625100.0
+    assert backfill["deal_num"] == 8382898
+    assert backfill["quota_text"] == "额度充足"
+    assert backfill["net_inflow"] is None
 
-    empty = client.get("/api/archive/northbound?trade_date=2026-10-22", headers=headers).json()
+    empty = client.get("/api/archive/northbound?trade_date=2026-10-21", headers=headers).json()
     assert empty == {"ok": True, "rows": [], "count": 0}
 
 

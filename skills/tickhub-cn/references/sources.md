@@ -74,6 +74,7 @@ state the unit next to the number:
 | `full_valuation` | — | 亿元 as `mcap_yi` |
 | `stock_profile` | shares | yuan |
 | `tencent_quote.amount` | — | 万元 (10k CNY), as published |
+| `tencent_ticks.amount` (per print) | 手 (lots) | 元 — so `completeness.amount_ratio` multiplies the quote amount by 10,000 before comparing |
 | other `amount` fields | — | yuan |
 
 Volumes from other providers are passed through as published; state the unit

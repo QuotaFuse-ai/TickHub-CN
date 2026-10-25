@@ -487,9 +487,79 @@ def fund_flow_backup(code: str) -> dict[str, Any]:
     return ok(out, "sina", source_url=_SINA_FLOW)
 
 
+_NORTHBOUND_CHANNELS = {"001": ("hk2sh", "沪股通"), "003": ("hk2sz", "深股通")}
+_NORTHBOUND_HISTORY_DAYS = 250
+
+
+def _northbound_history(days: int) -> dict[str, Any]:
+    """Daily northbound turnover from Eastmoney's datacenter report.
+
+    The exchange stopped publishing the daily *net buy* (``NET_DEAL_AMT``)
+    after 2024-08-16 — every later row carries null. Turnover (``DEAL_AMT``)
+    and trade count (``DEAL_NUM``) are still updated every session, so those
+    are the honest day-frequency series; net inflow stays ``null`` instead of
+    being invented as zero. Upstream amounts are in 百万元 and are converted
+    to 万元 here so they line up with the realtime channels.
+    """
+    span = max(1, min(int(days or 60), _NORTHBOUND_HISTORY_DAYS))
+    rows = em_datacenter(
+        "RPT_MUTUAL_DEAL_HISTORY",
+        columns=(
+            "MUTUAL_TYPE,TRADE_DATE,DEAL_AMT,DEAL_NUM,NET_DEAL_AMT,"
+            "QUOTA_BALANCE_TEXT,LEAD_STOCKS_NAME,LS_CHANGE_RATE,"
+            "INDEX_CLOSE_PRICE,INDEX_CHANGE_RATE"
+        ),
+        filter_str='(MUTUAL_TYPE in ("001","003"))',
+        page_size=span * 2,
+        sort_columns="TRADE_DATE",
+        sort_types="-1",
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        channel = _NORTHBOUND_CHANNELS.get(str(row.get("MUTUAL_TYPE") or ""))
+        if channel is None:
+            continue
+        net = to_float(row.get("NET_DEAL_AMT"))
+        deal = to_float(row.get("DEAL_AMT"))
+        out.append(
+            {
+                "trade_date": str(row.get("TRADE_DATE") or "")[:10],
+                "channel": channel[0],
+                "name": channel[1],
+                "deal_amount_wan": None if deal is None else round(deal * 100, 2),
+                "deal_num": to_int(row.get("DEAL_NUM")),
+                "net_inflow": None if net is None else round(net * 100, 2),
+                "quota_text": str(row.get("QUOTA_BALANCE_TEXT") or ""),
+                "lead_stock": row.get("LEAD_STOCKS_NAME"),
+                "lead_change_pct": to_float(row.get("LS_CHANGE_RATE")),
+                "index_close": to_float(row.get("INDEX_CLOSE_PRICE")),
+                "index_change_pct": to_float(row.get("INDEX_CHANGE_RATE")),
+            }
+        )
+    if not out:
+        return empty("eastmoney", "northbound history unavailable")
+    latest = max(str(r["trade_date"]) for r in out)
+    net_published = str(latest) < "2024-08-19"
+    return ok(
+        {"days": out, "latest": latest},
+        "eastmoney",
+        extra={
+            "count": len(out),
+            "unit": "万元",
+            "net_inflow_published": net_published,
+            "note": (
+                "DEAL_AMT 为当日成交额（万元），逐日更新。"
+                "NET_DEAL_AMT（当日净买额）自 2024-08-19 起上游停止披露，此后为 null，未以 0 填充。"
+            ),
+        },
+    )
+
+
 @tool(layer="funds", ttl="realtime")
-def northbound_flow() -> dict[str, Any]:
-    """Northbound / southbound intraday net flow (empty outside the session)."""
+def northbound_flow(history: bool = False, days: int = 60) -> dict[str, Any]:
+    """Northbound / southbound intraday net flow; ``history=True`` gives daily turnover history."""
+    if history:
+        return _northbound_history(days)
     payload = em_get(_KAMT, params={"fields1": "f1,f2,f3,f4", "fields2": "f51,f52,f53,f54"})
     data = (payload or {}).get("data") or {}
     if not data:
@@ -524,8 +594,18 @@ def northbound_flow() -> dict[str, Any]:
             }
         )
     if not active:
-        return empty("eastmoney", "northbound closed or not yet published", channels=rows, closed=closed)
-    return ok({"channels": rows}, "eastmoney", extra={"count": len(rows), "closed": closed})
+        return empty(
+            "eastmoney",
+            "northbound closed or not yet published",
+            channels=rows,
+            closed=closed,
+            unit="万元",
+        )
+    return ok(
+        {"channels": rows},
+        "eastmoney",
+        extra={"count": len(rows), "closed": closed, "unit": "万元"},
+    )
 
 
 @tool(layer="funds", ttl="semi_static")

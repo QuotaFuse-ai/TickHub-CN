@@ -15,6 +15,7 @@ def qt_line(
     prev_close: float = 10.2,
     open_: float = 10.3,
     volume: int = 123456,
+    amount: float = 98765432.0,
     market: str = "1",
     timestamp: str = "20261024150000",
     pb: float = 0.72,
@@ -46,7 +47,7 @@ def qt_line(
     put(32, f"{change / prev_close * 100:.2f}")
     put(33, f"{price + 0.2:.2f}")
     put(34, f"{price - 0.3:.2f}")
-    put(37, 98765432.0)
+    put(37, amount)
     put(38, 1.23)
     put(39, 6.54)
     put(43, 2.34)

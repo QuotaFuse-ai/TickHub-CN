@@ -39,6 +39,9 @@ sources-legacy = ["mootdx>=0.11"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 all = ["tickhub-cn[admin,db,sources]"]
 docx = ["python-docx>=1.1"]
+# cninfo_financial_notes(extract=true) reads the annual-report PDF; without pypdf
+# it falls back to a system pdftotext, and without either it stays a locator.
+notes = ["pypdf>=4.0"]
 
 [project.scripts]
 th-cn = "tickhub_cn.cli.main:main"

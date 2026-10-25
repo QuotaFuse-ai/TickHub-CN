@@ -235,21 +235,28 @@ def tencent_minute(code: str, period: str = "m5", limit: int = 320) -> dict[str,
     return ok({"code": normalize_code(code), "period": period, "bar": rows}, "tencent", extra={"count": len(rows)})
 
 
-@tool("tencent_ticks", layer="quotes", ttl="realtime", cache_domain="ticks")
-def tencent_ticks(code: str, page: int = 1) -> dict[str, Any]:
-    """Tick-by-tick trades for the latest session (Tencent, no BSE)."""
-    sym = _symbol(code)
+_TICKS_PAGE_SIZE = 70
+_TICKS_MAX_PAGES = 400
+_TICKS_TOLERANCE = 0.02
+
+
+def _tick_rows(sym: str, page: int) -> list[dict[str, Any]]:
+    """One upstream tick page; ``page=0`` is the first page."""
     text = request(
         "tencent",
         "GET",
         _TICKS,
-        params={"appn": "detail", "action": "data", "c": sym, "p": str(max(1, int(page or 1)))},
+        params={"appn": "detail", "action": "data", "c": sym, "p": str(page)},
         expect_json=False,
     )
     body = str(text)
     if "=" in body:
         body = body.split("=", 1)[1].strip().rstrip(";")
-    seq = js_json(body)
+    try:
+        seq = js_json(body)
+    except ValueError:
+        # Past the last page Tencent answers with an empty payload, not ``[]``.
+        return []
     entries = seq[1] if isinstance(seq, list) and len(seq) > 1 else ""
     rows = []
     for chunk in str(entries).split("|"):
@@ -264,10 +271,97 @@ def tencent_ticks(code: str, page: int = 1) -> dict[str, Any]:
                 "change": to_float(parts[3]),
                 "volume": to_int(parts[4]),
                 "amount": to_float(parts[5]),
-                "side": "buy" if parts[6] == "B" else "sell",
+                "side": {"B": "buy", "S": "sell", "M": "neutral"}.get(parts[6], "neutral"),
             }
         )
-    return ok({"code": normalize_code(code), "ticks": rows}, "tencent", extra={"count": len(rows)})
+    return rows
+
+
+def _tick_completeness(sym: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cross-check tick turnover against the daily quote (post-close gate).
+
+    Tick ``amount`` is in 元 and ``volume`` in 手; the quote reports the same
+    ``amount`` in 万元 and ``volume`` in 手. While the session is still open the
+    tick stream trails the quote, so the verdict stays ``None`` rather than
+    reporting a false shortfall.
+    """
+    tick_amount = round(sum(r["amount"] or 0 for r in rows), 2)
+    tick_volume = sum(r["volume"] or 0 for r in rows)
+    out: dict[str, Any] = {"tick_amount": tick_amount, "tick_volume": tick_volume}
+    try:
+        quote = _quote_rows([sym])[0]
+    except Exception as exc:  # noqa: BLE001 - the gate is optional, ticks still ship
+        out.update({"checked": False, "reason": f"quote unavailable: {exc}"[:200]})
+        return out
+
+    quote_amount = round((quote.get("amount") or 0) * 10000, 2)
+    quote_volume = quote.get("volume") or 0
+    out.update(
+        {
+            "checked": True,
+            "quote_amount": quote_amount,
+            "quote_volume": quote_volume,
+            "amount_ratio": round(tick_amount / quote_amount, 6) if quote_amount else None,
+            "volume_ratio": round(tick_volume / quote_volume, 6) if quote_volume else None,
+            "tolerance": _TICKS_TOLERANCE,
+        }
+    )
+    stamp = str(quote.get("timestamp") or "")
+    hhmm = to_int(stamp[8:12]) if len(stamp) >= 12 else None
+    out["session_closed"] = bool(hhmm is not None and hhmm >= 1500)
+    if not out["session_closed"]:
+        out["complete"] = None
+        out["note"] = "session still open; the turnover check only applies after 15:00"
+        return out
+    ratios = [r for r in (out["amount_ratio"], out["volume_ratio"]) if r is not None]
+    out["complete"] = all(abs(r - 1) <= _TICKS_TOLERANCE for r in ratios) if ratios else None
+    return out
+
+
+@tool("tencent_ticks", layer="quotes", ttl="realtime", cache_domain="ticks")
+def tencent_ticks(code: str, page: int = 0, full: bool = False) -> dict[str, Any]:
+    """Tick-by-tick trades for the latest session (Tencent, no BSE).
+
+    ``full=True`` walks every page and reconciles the summed turnover with the
+    daily quote, the post-close completeness check used by the reference repo.
+    """
+    sym = _symbol(code)
+    norm = normalize_code(code)
+    if not full:
+        rows = _tick_rows(sym, max(0, int(page or 0)))
+        return ok({"code": norm, "page": page, "full": False, "ticks": rows}, "tencent", extra={"count": len(rows)})
+
+    rows: list[dict[str, Any]] = []
+    pages = 0
+    while pages < _TICKS_MAX_PAGES:
+        got = _tick_rows(sym, pages)
+        if not got:
+            break
+        rows.extend(got)
+        pages += 1
+        if len(got) < _TICKS_PAGE_SIZE:
+            break
+
+    sides: dict[str, int] = {}
+    for row in rows:
+        sides[row["side"]] = sides.get(row["side"], 0) + 1
+    completeness = _tick_completeness(sym, rows)
+    extra: dict[str, Any] = {
+        "count": len(rows),
+        "pages": pages,
+        "truncated": pages >= _TICKS_MAX_PAGES,
+        "sides": sides,
+        "completeness": completeness,
+    }
+    if completeness.get("checked") and completeness.get("complete") is False:
+        extra["degraded"] = "ticks_incomplete"
+        extra["note"] = (
+            f"逐笔成交额 {completeness['tick_amount']:.2f} 元 对当日成交额 "
+            f"{completeness['quote_amount']:.2f} 元 偏差超过 {_TICKS_TOLERANCE:.0%}"
+        )
+    elif completeness.get("complete") is None and completeness.get("note"):
+        extra["note"] = completeness["note"]
+    return ok({"code": norm, "full": True, "ticks": rows}, "tencent", extra=extra)
 
 
 @tool("baidu_kline_with_ma", layer="quotes", ttl="semi_static", cache_domain="kline")
