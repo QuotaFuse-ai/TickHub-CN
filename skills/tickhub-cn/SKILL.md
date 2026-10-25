@@ -1,7 +1,7 @@
 ---
 name: tickhub-cn
 description: Use when a task needs real A-share market data through TickHub-CN — quotes, K-lines, financial statements, fund flows, announcements, research, macro, indices, futures, options, bonds, sentiment or valuation. Every number comes from an MCP tool call; never from model memory or estimation. Load this skill only when data must actually be fetched; for general market concepts or strategy discussion with no data requirement, do not load it.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # TickHub-CN（A股数据枢纽）

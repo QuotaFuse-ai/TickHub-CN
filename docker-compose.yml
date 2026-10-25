@@ -10,7 +10,7 @@
 services:
   tickhub-cn:
     build: .
-    image: tickhub-cn:0.1.0
+    image: tickhub-cn:0.1.1
     command: ["start-all", "--host", "0.0.0.0", "--port", "8000", "--crawler", "on"]
     ports:
       - "127.0.0.1:8000:8000"

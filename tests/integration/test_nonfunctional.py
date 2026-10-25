@@ -49,7 +49,7 @@ print(tickhub_cn.__version__)
     proc = _python(script, cwd=tmp_path)
     assert proc.returncode == 0, proc.stderr
     elapsed_ms, version = proc.stdout.split()
-    assert version == "0.1.0"
+    assert version == "0.1.1"
     assert float(elapsed_ms) < 300.0, f"cold import took {elapsed_ms} ms"
 
 
