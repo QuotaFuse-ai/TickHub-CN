@@ -160,6 +160,19 @@ def test_mcp_tool_count_includes_aliases() -> None:
     assert tool_count() == 149
 
 
+def test_tool_names_quoted_in_docs_are_callable() -> None:
+    """A copy-paste example that names a non-existent tool fails with QFSD-9002."""
+    names: set[str] = set()
+    for page in (ROOT / "docs").glob("*.md"):
+        text = page.read_text(encoding="utf-8")
+        names.update(re.findall(r'call_tool\(\s*"([^"]+)"', text))
+        names.update(re.findall(r"th-cn tool call (\S+)", text))
+    assert names
+    for name in sorted(names):
+        target = ALIASES.get(name, name)
+        assert target in REGISTRY, f"{name} appears in docs but is not a tool"
+
+
 @pytest.mark.parametrize("name", ["stock_profile", "tencent_ticks", "apply_adjust"])
 def test_ttl_regressions(name: str) -> None:
     """Guards the two TTL reconciliations recorded in docs/decisions/."""

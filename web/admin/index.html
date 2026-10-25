@@ -100,6 +100,11 @@
   kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 5px; background: var(--soft); font: 12px ui-monospace, Consolas, monospace; }
   .codes { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  .call-meta { margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--line);
+               border-left: 3px solid var(--accent); border-radius: 8px; background: var(--soft); }
+  .call-meta.degraded { border-left-color: var(--warn); }
+  .call-meta .degraded-line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; margin: 0 0 6px; }
+  .call-meta .note { margin: 6px 0 0; color: var(--muted); }
   dialog { max-width: min(760px, calc(100vw - 32px)); max-height: 80vh; overflow: auto;
            padding: 18px 22px; border: 1px solid var(--line); border-radius: 12px;
            background: var(--bg); color: var(--fg); box-shadow: 0 18px 48px rgba(0,0,0,.3); }
@@ -374,6 +379,37 @@ function cards(items) {
 
 function pre(value) {
   return `<pre>${esc(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>`;
+}
+
+// Mirror of the ``degraded`` tags emitted by the data layer; an unknown tag
+// still renders, so a new one never hides the warning.
+const DEGRADED_LABELS = {
+  eod_datacenter: "日频数据中心口径，非实时",
+  eod_constituent: "日频成分表，非实时",
+  headline_roster: "头条口径名单，可能不全",
+  stale_cache: "上游限流或熔断，返回最近一次成功结果",
+  tdx_package_stale: "盘后包未覆盖所请求的交易日",
+  tdx_package_missing: "部分市场盘后包缺失",
+};
+
+function metaBanner(payload) {
+  const meta = payload && payload.meta;
+  if (!meta || typeof meta !== "object") return "";
+  const facts = [];
+  if (meta.data_as_of) facts.push(["数据时点", meta.data_as_of]);
+  if (meta.source) facts.push(["来源", meta.source]);
+  if (meta.cache_hit !== undefined) facts.push(["缓存", meta.cache_hit ? "命中" : "未命中"]);
+  if (meta.count !== undefined) facts.push(["条数", meta.count]);
+  const degraded = meta.degraded ? String(meta.degraded) : "";
+  if (!degraded && !facts.length && !meta.note) return "";
+  const label = DEGRADED_LABELS[degraded];
+  const lead = degraded
+    ? `<p class="degraded-line"><span class="badge warn">降级</span><code>${esc(degraded)}</code>${label ? `<span>${esc(label)}</span>` : ""}</p>`
+    : "";
+  const rows = facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  const list = rows ? `<dl class="kv">${rows}</dl>` : "";
+  const note = meta.note ? `<p class="note">${esc(meta.note)}</p>` : "";
+  return `<div class="call-meta${degraded ? " degraded" : ""}">${lead}${list}${note}</div>`;
 }
 
 /* --------------------------------------------------------------- charts */
@@ -1169,8 +1205,8 @@ function jobPanel(job) {
       ["代码数", job.codes || "—"],
       ["窗口天数", job.days],
       ["已用时长", fmtDuration(job.elapsed_s)],
-      ["提交时间", job.created_at],
-      ["结束时间", job.finished_at || "—"],
+      ["提交时间", fmtStamp(job.created_at)],
+      ["结束时间", fmtStamp(job.finished_at)],
       ["取消请求", job.cancel_requested ? "已发出" : "—"],
       ["抓取 / 写入", result ? `${result.fetched} / ${result.inserted}` : "—"],
       ["失败代码", result && result.failed && result.failed.length ? result.failed.join(", ") : "—"],
@@ -1203,6 +1239,25 @@ function jobTable(jobs) {
     }));
   return table(rows, null, { sort: false, note: "顺序由服务端决定：最新在前。" })
     + `<h3>最近任务抓取量</h3>${svgBars(throughput, { title: "最近任务抓取量（条）" })}`;
+}
+
+// Archive rows outlive the process, so they carry no live progress and no
+// cancel/retry controls; the archive id is kept apart from in-process ids.
+function archiveTable(rows) {
+  if (!rows.length) return "<p class='empty'>归档里还没有任务记录。</p>";
+  const data = rows.map((job) => ({
+    "#": job.archive_id,
+    任务: job.task,
+    状态: job.status,
+    代码数: job.codes === null || job.codes === undefined ? "—" : job.codes,
+    抓取: job.fetched,
+    写入: job.inserted,
+    耗时: fmtDuration(job.elapsed_s),
+    开始: fmtStamp(job.started_at),
+    结束: fmtStamp(job.finished_at),
+    错误: job.error || "—",
+  }));
+  return table(data, null, { sort: false, note: "顺序由服务端决定：最新在前。" });
 }
 
 function paintCrawlerJobs(jobs) {
@@ -1294,8 +1349,11 @@ views.crawler = async () => {
     <div id="action-result"></div>
     <div id="crawler-job" data-key="empty">${jobPanel(jobs.find((job) =>
       job.status === "queued" || job.status === "running") || jobs[0] || null)}</div>
-    <h3>任务历史</h3>
+    <h3>任务历史（本次进程）</h3>
     <div id="crawler-job-list">${jobTable(jobs)}</div>
+    <h3>任务历史（归档）</h3>
+    <p class="sub">来自归档表 <code>crawl_task</code>：进程重启后仍能看到之前提交的抓取记录；这里只读，取消/重试只对本次进程的任务有效。</p>
+    <div id="crawler-archive-list">${archiveTable(jobData.history || [])}</div>
     <h3>归档统计</h3>
     ${kv(Object.entries(data.archive || {}))}`;
 };
@@ -1323,10 +1381,62 @@ views.logs = async () => {
 };
 
 views.config = async () => {
-  const data = await api("/api/config");
+  const [data, cleaning] = await Promise.all([
+    api("/api/config"),
+    api("/api/config/cleaning"),
+  ]);
+  const c = cleaning.cleaning || {};
+  const locks = c.env_locked || {};
+  const locked = ["enable", "base_url", "api_key", "model"].filter((k) => locks[k]);
   return `
     <h2>运行配置</h2>
-    <p class="sub">敏感项显示为 <code>***</code>；修改请通过环境变量或 <code>config/admin.toml</code>，本页只读。</p>
+    <h3>正文清洗（可选，默认关闭）</h3>
+    <p class="sub">
+      只处理公告 / 研报 / 新闻的长文本，价格、财务等数字从不经过模型。
+      开关保存到 <code>${esc(c.config_path || "model_gateway.toml")}</code>，MCP 进程下一次调用即生效。
+    </p>
+    ${c.error ? `<p class="sub" style="color:var(--bad)">配置文件解析失败：${esc(c.error)}</p>` : ""}
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="cleaning-enable" ${c.enable ? "checked" : ""} ${state.readonly ? "disabled" : ""} />
+        启用正文清洗
+      </label>
+      <span class="badge ${c.effective ? "ok" : ""}">${c.effective ? "当前生效" : "当前关闭"}</span>
+      ${c.legacy_enable ? `<span class="badge warn">CRAWL4AI_ENABLE=true</span>` : ""}
+    </div>
+    <div class="row">
+      <label>模型网关地址
+        <input id="cleaning-base" style="width:300px;" value="${esc(c.base_url || "")}" placeholder="例如 api.openai.com/v1（需带 http(s)://）" />
+      </label>
+      <label>模型
+        <input id="cleaning-model" style="width:180px;" value="${esc(c.model || "")}" placeholder="gpt-4o-mini" />
+      </label>
+      <label>API Key
+        <input id="cleaning-key" type="password" autocomplete="new-password" style="width:240px;"
+          placeholder="${c.api_key ? "已设置，留空表示不修改" : "可留空"}" />
+      </label>
+    </div>
+    <label style="display:block;">提示词
+      <textarea id="cleaning-prompt" style="min-height:70px;">${esc(c.prompt || "")}</textarea>
+    </label>
+    ${locked.length ? `<p class="sub" style="color:var(--warn)">
+      环境变量已锁定 ${esc(locked.join(" / "))}，这里保存的值不会生效；请先清掉对应的环境变量。
+    </p>` : ""}
+    <div class="row">
+      ${writeButton("保存清洗配置", "cleaning-save")}
+      <button type="button" data-action="refresh-view">重新读取</button>
+    </div>
+    <h3>清洗试跑</h3>
+    <p class="sub">粘贴一段公告 HTML 或正文，对比清洗前后。开关关闭时原样返回；开启但模型网关未就绪时退回本地去标签，不产生调用。</p>
+    <label style="display:block;">
+      <textarea id="cleaning-sample" style="min-height:110px;" placeholder="&lt;div&gt;原文…&lt;/div&gt;"></textarea>
+    </label>
+    <div class="row">
+      <button type="button" class="primary" data-action="cleaning-test" data-allow-readonly="1">试跑</button>
+    </div>
+    <div id="action-result"></div>
+    <h3>全部配置（只读）</h3>
+    <p class="sub">敏感项显示为 <code>***</code>；其余修改请通过环境变量或 <code>config/admin.toml</code>。</p>
     ${kv(Object.entries(data.config || {}))}`;
 };
 
@@ -1437,6 +1547,52 @@ async function handleAction(action, button) {
     });
   }
 
+  if (action === "cleaning-save") {
+    if (!guardReadonly()) return;
+    return runAction(button, async () => {
+      const payload = {
+        enable: $("#cleaning-enable").checked,
+        base_url: $("#cleaning-base").value.trim(),
+        model: $("#cleaning-model").value.trim(),
+        prompt: $("#cleaning-prompt").value,
+      };
+      const key = $("#cleaning-key").value;
+      if (key) payload.api_key = key;
+      const data = await api("/api/config/cleaning", { method: "PUT", body: JSON.stringify(payload) });
+      const c = data.cleaning || {};
+      show(kv([
+        ["启用", c.enable ? "是" : "否"],
+        ["当前生效", c.effective ? "是" : "否"],
+        ["模型网关就绪", c.ready ? "是" : "否"],
+        ["模型", c.model || "—"],
+        ["地址", c.base_url || "—"],
+        ["配置文件", c.config_path || "—"],
+      ]));
+      toast("清洗配置已保存");
+      await renderRoute(true);
+    });
+  }
+
+  if (action === "cleaning-test") {
+    const text = $("#cleaning-sample").value;
+    if (!text.trim()) { toast("请先粘贴一段文本", true); return; }
+    return runAction(button, async () => {
+      const data = await post("/api/config/cleaning/test", { text });
+      const r = data.result || {};
+      const st = r.stat || {};
+      show(
+        kv([
+          ["调用模型", (data.cleaning || {}).ready ? "是" : "否（本地去标签）"],
+          ["原长", st.raw_len],
+          ["清洗后", st.clean_len],
+          ["压缩比", st.reduce_rate],
+        ])
+        + `<h3>清洗后</h3>${pre(r.clean_content)}`
+        + `<h3>原文</h3>${pre(r.raw_content)}`,
+      );
+    });
+  }
+
   if (action === "mcp-filter") {
     const layer = $("#mcp-layer").value;
     state.mcpLayer = layer;
@@ -1454,10 +1610,10 @@ async function handleAction(action, button) {
       catch (_) { toast("参数不是合法 JSON", true); return; }
       try {
         const data = await post("/api/mcp/call", { tool, params });
-        show(pre(data.payload) + codeHelpHtml(JSON.stringify(data.payload)));
+        show(metaBanner(data.payload) + pre(data.payload) + codeHelpHtml(JSON.stringify(data.payload)));
       } catch (exc) {
         const payload = exc.payload || { error: exc.message };
-        show(pre(payload) + codeHelpHtml(JSON.stringify(payload)));
+        show(metaBanner(payload) + pre(payload) + codeHelpHtml(JSON.stringify(payload)));
         throw exc;
       }
     });
@@ -1581,6 +1737,11 @@ async function renderRoute(force = false) {
   } finally {
     rendering = false;
   }
+}
+
+function fmtStamp(value) {
+  if (!value) return "—";
+  return String(value).replace("T", " ").slice(0, 16);
 }
 
 function fmtDuration(seconds) {

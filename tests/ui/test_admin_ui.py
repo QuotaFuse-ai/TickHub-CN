@@ -37,6 +37,8 @@ ENDPOINTS = (
     "/api/crosscheck",
     "/api/risk",
     "/api/config",
+    "/api/config/cleaning",
+    "/api/config/cleaning/test",
     "/api/audit",
 )
 
@@ -99,6 +101,127 @@ def test_write_actions_are_guarded_by_readonly() -> None:
     # only tools that declare themselves writers.
     assert 'data-action="mcp-call" data-allow-readonly="1"' in html
     assert "dataset.allowReadonly" in html
+
+
+def test_mcp_debug_result_leads_with_envelope_metadata() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert "function metaBanner(" in html
+    # Both the success and the error branch put the banner above the raw JSON.
+    assert html.count("show(metaBanner(data.payload) + pre(data.payload)") == 1
+    assert html.count("show(metaBanner(payload) + pre(payload)") == 1
+    assert "meta.data_as_of" in html
+    assert "meta.degraded" in html
+
+
+def test_degraded_labels_cover_every_tag_the_data_layer_emits() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    block = re.search(r"const DEGRADED_LABELS = \{.*?\n\};", html, flags=re.S)
+    assert block
+    labelled = set(re.findall(r"^\s*([a-z_]+):", block.group(0), flags=re.M))
+    emitted: set[str] = set()
+    sources = (ADMIN_PAGE.parents[2] / "src" / "tickhub_cn" / "datasources").glob("*.py")
+    for source in sources:
+        for line in source.read_text(encoding="utf-8").splitlines():
+            if "degraded" not in line:
+                continue
+            emitted.update(re.findall(r'(?:"degraded"\s*:\s*|\["degraded"\]\s*=\s*|degraded=)"([a-z_]+)"', line))
+            emitted.update(re.findall(r'\bor\s+"([a-z_]+)"', line))
+    assert emitted
+    assert not (emitted - labelled), emitted - labelled
+
+
+def test_meta_banner_renders_degradation_before_the_payload(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+
+    script = _script(ADMIN_PAGE.read_text(encoding="utf-8"))
+    esc = re.search(r"function esc\(value\).*?\n\}\n", script, flags=re.S)
+    banner = re.search(r"const DEGRADED_LABELS = \{.*?\nfunction metaBanner\(.*?\n\}\n", script, flags=re.S)
+    assert esc and banner
+    probe = esc.group(0) + banner.group(0) + r'''
+const degraded = metaBanner({ok: true, meta: {
+  source: "eastmoney", data_as_of: "2026-10-23", cache_hit: false, count: 5123,
+  degraded: "eod_datacenter", note: "收盘后 <快照>",
+}});
+const clean = metaBanner({ok: true, meta: {source: "exchange", data_as_of: "2026-10-23", cache_hit: true, count: 0}});
+process.stdout.write(JSON.stringify({
+  degraded, clean,
+  failed: metaBanner({ok: false, error: {code: "QFSD-9003"}}),
+  bare: metaBanner({ok: true, meta: {}}),
+  unknown: metaBanner({ok: true, meta: {degraded: "brand_new_tag"}}),
+}));
+'''
+    source = tmp_path / "meta_banner.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(source)], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    # No envelope metadata: nothing is invented above the payload.
+    assert out["failed"] == ""
+    assert out["bare"] == ""
+    # Degradation leads, followed by the point-in-time facts.
+    assert out["degraded"].startswith('<div class="call-meta degraded">')
+    assert out["degraded"].index("降级") < out["degraded"].index("数据时点")
+    for needle in ("eod_datacenter", "日频数据中心口径，非实时", "2026-10-23", "eastmoney", "未命中", "5123"):
+        assert needle in out["degraded"], needle
+    # Upstream text reaches the page escaped, not as markup.
+    assert "&lt;快照&gt;" in out["degraded"]
+    assert "<快照>" not in out["degraded"]
+    # An undegraded envelope still shows when the data is from.
+    assert '<div class="call-meta">' in out["clean"]
+    assert "降级" not in out["clean"]
+    assert "命中" in out["clean"]
+    assert "<dd>0</dd>" in out["clean"]
+    # A tag the page has not seen yet still warns instead of disappearing.
+    assert "brand_new_tag" in out["unknown"]
+    assert "降级" in out["unknown"]
+
+
+def test_archive_table_formats_timestamps(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    # Both the live job panel and the archive table go through the same helper.
+    assert "开始: fmtStamp(job.started_at)" in html
+    assert '["提交时间", fmtStamp(job.created_at)]' in html
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    script = _script(html)
+    stamp = re.search(r"function fmtStamp\(value\).*?\n\}\n", script, flags=re.S)
+    assert stamp
+    probe = stamp.group(0) + r'''
+process.stdout.write(JSON.stringify([
+  fmtStamp("2026-10-25T16:23:36+08:00"),
+  fmtStamp("2026-10-25T16:23:36"),
+  fmtStamp(null),
+  fmtStamp(""),
+  fmtStamp("2026-10-25"),
+]));
+'''
+    source = tmp_path / "fmt_stamp.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run(
+        [node, str(source)], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "2026-10-25 16:23",
+        "2026-10-25 16:23",
+        "—",
+        "—",
+        "2026-10-25",
+    ]
 
 
 def test_page_renders_charts_as_inline_svg() -> None:

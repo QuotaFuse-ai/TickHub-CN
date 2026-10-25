@@ -1,8 +1,10 @@
 """Optional long-text cleaning for crawled announcements and reports (spec §4.11).
 
-Crawl4AI is an optional dependency and the model gateway is switched off by
-default, so the default install returns the raw text untouched. Numbers are
-never rewritten here: cleaning only removes page chrome (menus, ads, footers).
+The switch lives on the model gateway (``model_gateway.toml`` / ``CRAWL4AI_ENABLE``)
+and is off by default, so the default install returns the raw text untouched
+with zero model calls. No ``crawl4ai`` package is imported: cleaning posts to an
+OpenAI-compatible ``/chat/completions`` endpoint. Numbers are never rewritten
+here — cleaning only removes page chrome (menus, ads, footers).
 """
 
 from __future__ import annotations
@@ -36,6 +38,15 @@ def strip_html(text: str) -> str:
     return _BLANK_RE.sub("\n\n", out).strip()
 
 
+def cleaning_enabled() -> bool:
+    """True when the gateway is on, or when the legacy ``CRAWL4AI_ENABLE`` is set."""
+    if get_settings().crawl4ai_enable:
+        return True
+    from ..model_gateway import enabled
+
+    return enabled()
+
+
 def clean_text(text: str, *, prompt: str | None = None, model: str | None = None) -> dict[str, Any]:
     """Return ``{raw_content, clean_content, stat:{raw_len, clean_len, reduce_rate}}``."""
     raw = str(text or "")
@@ -43,19 +54,24 @@ def clean_text(text: str, *, prompt: str | None = None, model: str | None = None
     cleaned = raw
 
     settings = get_settings()
-    if settings.crawl4ai_enable and raw.strip():
+    active = cleaning_enabled()
+    if active and raw.strip():
         try:
-            from ..model_gateway import chat, enabled
+            from ..model_gateway import chat, enabled, get_gateway_config
 
             if not enabled():
                 _log().warning(
-                    "crawl4ai enabled but model gateway is off",
+                    "text cleaning enabled but model gateway is off",
                     extra={"event": "clean_skip", "error_code": "QFSD-9003"},
                 )
             else:
+                conf = get_gateway_config()
                 payload = chat(
                     [
-                        {"role": "system", "content": prompt or settings.crawl4ai_prompt},
+                        {
+                            "role": "system",
+                            "content": prompt or conf.prompt or settings.crawl4ai_prompt,
+                        },
                         {"role": "user", "content": raw[:MAX_INPUT]},
                     ],
                     purpose="text_clean",
@@ -70,7 +86,7 @@ def clean_text(text: str, *, prompt: str | None = None, model: str | None = None
                 extra={"event": "clean_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
             )
 
-    if settings.crawl4ai_enable and cleaned is raw and "<" in raw and ">" in raw:
+    if active and cleaned is raw and "<" in raw and ">" in raw:
         cleaned = strip_html(raw)
 
     clean_len = len(cleaned)

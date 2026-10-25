@@ -309,3 +309,98 @@ def test_readonly_allows_job_reads_but_blocks_submit_cancel_and_retry() -> None:
     assert client.post("/api/crawler/run", headers=_headers(), json={"task": "risks"}).status_code == 403
     assert client.post("/api/crawler/jobs/1/cancel", headers=_headers()).status_code == 403
     assert client.post("/api/crawler/jobs/1/retry", headers=_headers()).status_code == 403
+
+
+def test_archive_history_survives_a_process_restart() -> None:
+    from tickhub_cn.crawler.store import get_archive
+
+    archive = get_archive()
+    task_id = archive.start_task("announcements", {"codes": 2, "days": 7})
+    archive.finish_task(
+        task_id,
+        status="ok",
+        fetched=3,
+        inserted=2,
+        detail={"codes": 2, "days": 7, "elapsed_s": 1.5},
+    )
+
+    body = _client().get("/api/crawler/jobs", headers=_headers()).json()
+    assert body["jobs"] == []  # nothing runs in this process
+    assert [row["archive_id"] for row in body["history"]] == [task_id]
+    row = body["history"][0]
+    assert row["archived"] is True
+    assert row["task"] == "announcements"
+    assert row["status"] == "ok"
+    assert row["codes"] == 2
+    assert row["days"] == 7
+    assert row["elapsed_s"] == 1.5
+    assert (row["fetched"], row["inserted"]) == (3, 2)
+
+
+def test_archive_history_skips_a_run_an_in_process_job_shows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tickhub_cn.crawler.store import get_archive
+
+    archive = get_archive()
+    task_id = archive.start_task("risks", {"codes": 0, "days": 7})
+    archive.finish_task(task_id, status="ok")
+
+    def fake_run_task(task: str = "all", **_: Any) -> dict[str, Any]:
+        return {
+            "task": task, "status": "ok", "codes": 0, "fetched": 0,
+            "inserted": 0, "failed": [], "task_id": task_id,
+        }
+
+    monkeypatch.setattr(runner, "run_task", fake_run_task)
+    job = runner.submit_job("risks")
+    wait_for(lambda: _job(job["id"], "ok"))
+
+    body = _client().get("/api/crawler/jobs", headers=_headers()).json()
+    assert [row["id"] for row in body["jobs"]] == [job["id"]]
+    assert body["history"] == []
+
+
+def test_archive_history_hides_an_active_row_while_a_job_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tickhub_cn.crawler.store import get_archive
+
+    archive = get_archive()
+    task_id = archive.start_task("all", {"codes": 1, "days": 3})
+    release = threading.Event()
+
+    def fake_run_task(task: str = "all", **_: Any) -> dict[str, Any]:
+        assert release.wait(5)
+        return {"task": task, "status": "ok", "codes": 0, "fetched": 0, "inserted": 0, "failed": []}
+
+    monkeypatch.setattr(runner, "run_task", fake_run_task)
+    job = runner.submit_job("announcements")
+    wait_for(lambda: _job(job["id"], "running"))
+
+    client = _client()
+    live = client.get("/api/crawler/jobs", headers=_headers()).json()
+    assert live["running"] == job["id"]
+    assert task_id not in [row["archive_id"] for row in live["history"]]
+
+    release.set()
+    wait_for(lambda: _job(job["id"], "ok"))
+    after = client.get("/api/crawler/jobs", headers=_headers()).json()
+    # The row never finished (a crashed run); with nothing live it surfaces as-is.
+    stale = [row for row in after["history"] if row["archive_id"] == task_id]
+    assert len(stale) == 1
+    assert stale[0]["status"] == "running"
+
+
+def test_a_broken_archive_leaves_the_live_job_view_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom() -> Any:
+        raise RuntimeError("archive is locked")
+
+    monkeypatch.setattr(runner, "get_archive", boom)
+    listed = _client().get("/api/crawler/jobs", headers=_headers())
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["history"] == []
+    assert body["jobs"] == []

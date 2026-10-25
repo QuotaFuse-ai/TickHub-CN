@@ -30,7 +30,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-crawl = ["crawl4ai>=0.4"]
 admin = ["fastapi>=0.110", "uvicorn>=0.27"]
 db = ["sqlalchemy>=2.0", "pymysql>=1.1", "psycopg2-binary>=2.9"]
 sources = ["akshare>=1.12", "baostock>=0.8", "xlrd>=2.0", "openpyxl>=3.1", "pandas>=2.0"]
@@ -38,7 +37,7 @@ sources = ["akshare>=1.12", "baostock>=0.8", "xlrd>=2.0", "openpyxl>=3.1", "pand
 # venv; only stock_f10_tips imports it at call time, so it stays opt-in.
 sources-legacy = ["mootdx>=0.11"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
-all = ["tickhub-cn[crawl,admin,db,sources]"]
+all = ["tickhub-cn[admin,db,sources]"]
 docx = ["python-docx>=1.1"]
 
 [project.scripts]

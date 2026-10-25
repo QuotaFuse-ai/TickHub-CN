@@ -1,6 +1,6 @@
 """Offline crawler: watchlist jobs, SQLite archive, cron daemon, text cleaning."""
 
-from .cleaner import clean_text, strip_html
+from .cleaner import clean_text, cleaning_enabled, strip_html
 from .daemon import daemon_status, read_state, request_stop, run_daemon, state_path
 from .jobs import (
     TASKS,
@@ -16,6 +16,7 @@ from .jobs import (
 from .runner import (
     JobBusy,
     JobNotFound,
+    archive_jobs,
     cancel_job,
     get_job,
     list_jobs,
@@ -33,8 +34,10 @@ __all__ = [
     "JobNotFound",
     "TaskResult",
     "archive_announcements",
+    "archive_jobs",
     "cancel_job",
     "clean_text",
+    "cleaning_enabled",
     "crawl_announcements",
     "crawl_reports",
     "crawl_risks",

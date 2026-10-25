@@ -68,11 +68,12 @@ class Settings:
     enable_iwencai: bool = True
     enable_tushare: bool = False
 
-    # crawl4ai
+    # Optional long-text cleaning. The switch and endpoint normally live in
+    # model_gateway.toml (admin console); these env vars win when set.
     crawl4ai_enable: bool = False
-    crawl4ai_base_url: str = "https://api.openai.com/v1"
+    crawl4ai_base_url: str = ""
     crawl4ai_api_key: str = ""
-    crawl4ai_model: str = "gpt-4o-mini"
+    crawl4ai_model: str = ""
     crawl4ai_prompt: str = (
         "提取正文，移除广告、导航、弹窗、无关链接，保留公告和研报全部业务内容，不要篡改原文信息"
     )
@@ -150,9 +151,9 @@ class Settings:
             enable_iwencai=_bool(g("ENABLE_IWENCAI"), True),
             enable_tushare=_bool(g("ENABLE_TUSHARE"), False),
             crawl4ai_enable=_bool(g("CRAWL4AI_ENABLE"), False),
-            crawl4ai_base_url=g("CRAWL4AI_BASE_URL", "https://api.openai.com/v1"),
+            crawl4ai_base_url=g("CRAWL4AI_BASE_URL"),
             crawl4ai_api_key=g("CRAWL4AI_API_KEY"),
-            crawl4ai_model=g("CRAWL4AI_MODEL", "gpt-4o-mini"),
+            crawl4ai_model=g("CRAWL4AI_MODEL"),
             crawl4ai_prompt=g(
                 "CRAWL4AI_PROMPT",
                 "提取正文，移除广告、导航、弹窗、无关链接，保留公告和研报全部业务内容，不要篡改原文信息",

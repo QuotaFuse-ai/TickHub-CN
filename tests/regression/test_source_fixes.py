@@ -631,3 +631,97 @@ def test_sse_interaction_rejects_a_silent_page(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(TickHubError) as excinfo:
         irm.sse_e_interaction("600000", _no_cache=True)
     assert excinfo.value.code == "QFSD-9003"
+
+
+# --------------------------------------------------------------------------- #
+# SSE e-Interaction relative timestamps (V3.10.3)
+# --------------------------------------------------------------------------- #
+
+def _fixed_shanghai():
+    import datetime as dt
+
+    return dt.datetime(2026, 10, 25, 10, 0, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+
+
+def test_sse_time_normalises_relative_and_absolute_stamps() -> None:
+    import datetime as dt
+
+    from tickhub_cn.datasources import irm
+
+    now = dt.datetime(2026, 10, 25, 10, 0)
+    cases = {
+        "昨天 18:22": "2026-10-24 18:22",
+        "今天 09:05": "2026-10-25 09:05",
+        "前天 23:59": "2026-10-23 23:59",
+        "2026-10-23 18:22": "2026-10-23 18:22",
+        "2026年10月23日 18:22": "2026-10-23 18:22",
+        "10-22 18:22": "2026-10-22 18:22",
+        "3 分钟前": "2026-10-25 09:57",
+        "2 小时前": "2026-10-25 08:00",
+        "刚刚": "2026-10-25 10:00",
+        "18:22": "2026-10-25 18:22",
+    }
+    for text, expected in cases.items():
+        assert irm._sse_time(text, now=now) == expected, text
+    assert irm._sse_time("昨天 25:00", now=now) is None
+    assert irm._sse_time("", now=now) is None
+    assert irm._sse_time("不是时间", now=now) is None
+
+
+def test_sse_time_rolls_a_future_month_day_back_a_year() -> None:
+    import datetime as dt
+
+    from tickhub_cn.datasources import irm
+
+    now = dt.datetime(2026, 1, 3, 10, 0)
+    assert irm._sse_time("12-30 18:22", now=now) == "2025-12-30 18:22"
+
+
+def test_sse_required_time_still_reports_unrecognised_text() -> None:
+    from tickhub_cn.datasources import irm
+
+    with pytest.raises(TickHubError) as excinfo:
+        irm._sse_required_time("7", "某个新写法")
+    assert excinfo.value.code == "QFSD-9003"
+    assert "某个新写法" in str(excinfo.value)
+
+
+def test_sse_feed_normalises_a_relative_answer_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tickhub_cn.datasources import irm
+
+    monkeypatch.setattr(irm, "now_shanghai", _fixed_shanghai)
+    page = (
+        '<div class="m_feed_item" id="item-42">'
+        '<div class="m_feed_txt"><a href="#">:浦发银行(600000)</a>请问三季度业绩如何？</div>'
+        '<div class="m_feed_from"><span>2026-10-23 09:00</span></div>'
+        '<div class="m_feed_detail m_qa">'
+        '<div class="m_feed_txt">经营稳健，详见公告。</div>'
+        '<div class="m_feed_from"><span>昨天 18:22</span></div>'
+        "</div></div>"
+    )
+
+    rows = irm._sse_parse_feed(page)
+
+    assert rows[0]["question_time"] == "2026-10-23 09:00"
+    assert rows[0]["answer_time"] == "2026-10-24 18:22"
+
+
+def test_sse_feed_refuses_an_unparseable_reply_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tickhub_cn.datasources import irm
+
+    monkeypatch.setattr(irm, "now_shanghai", _fixed_shanghai)
+    page = (
+        '<div class="m_feed_item" id="item-7">'
+        '<div class="m_feed_txt"><a href="#">:浦发银行(600000)</a>问题</div>'
+        '<div class="m_feed_from"><span>2026-10-23 09:00</span></div>'
+        '<div class="m_feed_detail m_qa">'
+        '<div class="m_feed_txt">回答</div>'
+        '<div class="m_feed_from"><span>下次再说</span></div>'
+        "</div></div>"
+    )
+
+    with pytest.raises(TickHubError) as excinfo:
+        irm._sse_parse_feed(page)
+    assert excinfo.value.code == "QFSD-9003"

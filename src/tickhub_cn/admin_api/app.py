@@ -97,6 +97,120 @@ def masked_settings(settings: Settings | None = None) -> dict[str, Any]:
     return out
 
 
+GATEWAY_HEADER = """# Optional multi-model gateway.
+#
+# TickHub-CN NEVER routes prices, financials or any other numeric value through
+# a model. The gateway exists only for auxiliary text work (announcement and
+# report cleaning) and is disabled by default.
+#
+# Saved by the admin console's 运行配置 page. Environment variables win:
+#   MODEL_GATEWAY_ENABLE / MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY
+#   MODEL_GATEWAY_DEFAULT_MODEL / CRAWL4AI_ENABLE
+"""
+
+
+def _env_locks(settings: Settings) -> dict[str, bool]:
+    """Which values an env var pins, so the console can say a save is shadowed."""
+    return {
+        "enable": bool(settings.model_gateway_enable or settings.crawl4ai_enable),
+        "base_url": bool(settings.model_gateway_base_url or settings.crawl4ai_base_url),
+        "api_key": bool(settings.model_gateway_api_key or settings.crawl4ai_api_key),
+        "model": bool(settings.model_gateway_default_model or os.environ.get("CRAWL4AI_MODEL", "").strip()),
+    }
+
+
+def cleaning_state(settings: Settings | None = None) -> dict[str, Any]:
+    from ..crawler.cleaner import cleaning_enabled
+    from ..model_gateway import enabled, get_gateway_config
+
+    s = settings or get_settings()
+    conf = get_gateway_config()
+    return {
+        "enable": bool(conf.enable),
+        "effective": bool(cleaning_enabled()),
+        "ready": bool(enabled()),
+        "base_url": conf.base_url,
+        "api_key": "***" if conf.api_key else "",
+        "model": conf.model_for("text_clean"),
+        "default_model": conf.default_model,
+        "prompt": conf.prompt or s.crawl4ai_prompt,
+        "prompt_from_file": bool(conf.prompt),
+        "config_path": conf.config_path,
+        "error": conf.error,
+        "legacy_enable": bool(s.crawl4ai_enable),
+        "env_locked": _env_locks(s),
+    }
+
+
+def write_cleaning_settings(payload: dict[str, Any], settings: Settings | None = None) -> dict[str, Any]:
+    """Persist the cleaning switch to model_gateway.toml and reload in place."""
+    from ..core.config import reload_settings
+    from ..model_gateway import reload_gateway_config
+
+    if toml is None:
+        raise ValueError("the toml module is unavailable")
+    s = settings or get_settings()
+    path = Path(s.model_gateway_config_path or "./model_gateway.toml")
+    doc: dict[str, Any] = {}
+    if path.exists():
+        try:
+            doc = toml.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            raise ValueError(f"{path.name} is not valid TOML: {exc}") from exc
+    section = dict(doc.get("model_gateway") or {})
+
+    enable = bool(payload.get("enable")) if "enable" in payload else bool(section.get("enable"))
+    base_url = str(payload.get("base_url", section.get("base_url", "")) or "").strip()
+    if base_url and not (base_url.startswith("http://") or base_url.startswith("https://")):
+        raise ValueError("base_url must start with http:// or https://")
+
+    routing = dict(section.get("routing") or {})
+    model = str(payload.get("model", routing.get("text_clean", "")) or "").strip()[:120]
+    if model:
+        routing["text_clean"] = model
+    else:
+        routing.pop("text_clean", None)
+
+    default_model = str(section.get("default_model") or "").strip() or model
+    raw_key = payload.get("api_key")
+    if raw_key is None or str(raw_key) == "***":
+        api_key = str(section.get("api_key") or "")
+    else:
+        api_key = str(raw_key).strip()
+
+    cleaning = dict(section.get("cleaning") or {})
+    if "prompt" in payload:
+        prompt = str(payload.get("prompt") or "").strip()[:2000]
+        if prompt:
+            cleaning["prompt"] = prompt
+        else:
+            cleaning.pop("prompt", None)
+
+    eff_base = s.model_gateway_base_url or s.crawl4ai_base_url or base_url
+    eff_model = s.model_gateway_default_model or model or default_model
+    if enable and not eff_base:
+        raise ValueError("base_url is required when enabling cleaning")
+    if enable and not eff_model:
+        raise ValueError("model is required when enabling cleaning")
+
+    section.update(
+        enable=enable, base_url=base_url, api_key=api_key, default_model=default_model, routing=routing
+    )
+    if cleaning:
+        section["cleaning"] = cleaning
+    else:
+        section.pop("cleaning", None)
+    doc["model_gateway"] = section
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.with_suffix(path.suffix + ".bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    path.write_text(GATEWAY_HEADER + "\n" + toml.dumps(doc), encoding="utf-8")
+    reload_settings()
+    reload_gateway_config()
+    return cleaning_state(get_settings())
+
+
 def _client_host(request: Any) -> str:
     try:
         return str(request.client.host if request.client else "")
@@ -432,10 +546,15 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
     @app.get("/api/crawler/jobs")
     def crawler_jobs(request: Request, limit: int = 20) -> dict[str, Any]:
         auth(request)
-        from ..crawler import list_jobs, running_job
+        from ..crawler import archive_jobs, list_jobs, running_job
 
         running = running_job()
-        return {"ok": True, "jobs": list_jobs(limit=limit), "running": (running or {}).get("id")}
+        return {
+            "ok": True,
+            "jobs": list_jobs(limit=limit),
+            "running": (running or {}).get("id"),
+            "history": archive_jobs(limit=limit),
+        }
 
     @app.get("/api/crawler/jobs/{job_id}")
     def crawler_job(request: Request, job_id: int) -> dict[str, Any]:
@@ -508,6 +627,40 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
         auth(request)
         data = masked_settings(settings)
         return {"ok": True, "config": data, "masked": True}
+
+    @app.get("/api/config/cleaning")
+    def cleaning_api(request: Request) -> dict[str, Any]:
+        auth(request)
+        return {"ok": True, "cleaning": cleaning_state(settings)}
+
+    @app.put("/api/config/cleaning")
+    def cleaning_save(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        actor = auth(request)
+        write_guard(actor)
+        try:
+            state = write_cleaning_settings(payload, settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        audit(
+            "config.cleaning",
+            actor=actor,
+            detail={"enable": state["enable"], "model": state["model"], "base_url": state["base_url"]},
+        )
+        return {"ok": True, "cleaning": state}
+
+    @app.post("/api/config/cleaning/test")
+    def cleaning_test(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        actor = auth(request)
+        text = str(payload.get("text") or "")
+        if not text.strip():
+            raise HTTPException(status_code=422, detail="text is required")
+        from ..crawler.cleaner import clean_text
+
+        prompt = str(payload.get("prompt") or "").strip() or None
+        result = clean_text(text, prompt=prompt)
+        state = cleaning_state(settings)
+        audit("config.cleaning_test", actor=actor, detail={"chars": len(text), "model_call": state["ready"]})
+        return {"ok": True, "cleaning": state, "result": result}
 
     @app.get("/api/audit")
     def audit_api(request: Request, limit: int = 100) -> dict[str, Any]:

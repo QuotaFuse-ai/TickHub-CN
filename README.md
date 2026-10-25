@@ -31,8 +31,11 @@ python -m venv .venv
 pip install -e ".[dev]"         # or: pip install tickhub-cn
 ```
 
-Optional feature groups: `.[crawl]` (Crawl4AI), `.[admin]` (Admin Console),
+Optional feature groups: `.[admin]` (Admin Console),
 `.[sources]` (akshare / baostock / pandas), `.[db]` (log DB), `.[all]`.
+Optional long-text cleaning needs no extra: it posts to an OpenAI-compatible
+`/chat/completions` endpoint and is switched on from the admin console
+(`model_gateway.toml`), off by default.
 `.[sources-legacy]` installs mootdx on request; it pins `httpx<0.26` and
 `tenacity<9`, so it is kept out of the default extra. Only `stock_f10_tips`
 imports it, lazily at call time.

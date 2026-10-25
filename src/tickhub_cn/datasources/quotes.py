@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
+import json
 import re
 import struct
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
 from ..core.errors import TickHubError
-from ..core.http import request
+from ..core.http import fetch, request
 from ..core.ticker import (
     compact_date,
     ensure_code_list,
@@ -389,6 +391,10 @@ def etf_quote(codes: str) -> dict[str, Any]:
     return envelope_rows(rows, "tencent")
 
 
+_TDX_MARKETS = ("sh", "sz", "bj")
+_DAY_RECORD = 32  # date, open, high, low, close, amount, volume, reserved
+
+
 def _parse_day_record(blob: bytes) -> dict[str, Any]:
     date, open_, high, low, close, amount, volume, _ = struct.unpack("<IIIIIfII", blob)
     return {
@@ -402,52 +408,128 @@ def _parse_day_record(blob: bytes) -> dict[str, Any]:
     }
 
 
-def _download_tdx(market: str, cache_dir: Path) -> Path:
+def _day_record_for(blob: bytes, trade_date: str) -> dict[str, Any] | None:
+    """Record for ``trade_date`` in one .day file.
+
+    Records are fixed-width and appended in date order, so scan from the tail
+    and stop at the first record older than the target.
+    """
+    if not trade_date:
+        return None
+    compact = trade_date.replace("-", "")
+    for offset in range(len(blob) - _DAY_RECORD, -1, -_DAY_RECORD):
+        chunk = blob[offset : offset + _DAY_RECORD]
+        (day,) = struct.unpack("<I", chunk[:4])
+        stamp = f"{day:08d}"
+        if stamp == compact:
+            return _parse_day_record(chunk)
+        if stamp < compact:
+            return None
+    return None
+
+
+def _package_latest(blob: bytes) -> str:
+    if len(blob) < _DAY_RECORD:
+        return ""
+    return _parse_day_record(blob[-_DAY_RECORD:])["date"]
+
+
+def _is_index_code(market: str, code: str) -> bool:
+    """Index files ship in the same package; an index "amount" is a market total."""
+    if market == "sh":
+        return code.startswith(("000", "880", "999"))
+    if market == "sz":
+        return code.startswith("399")
+    return code.startswith("899")
+
+
+def _bj_date() -> str:
+    return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).date().isoformat()
+
+
+def _tdx_stamp(target: Path) -> Path:
+    return target.with_suffix(target.suffix + ".stamp")
+
+
+def _read_tdx_stamp(target: Path) -> dict[str, Any]:
+    path = _tdx_stamp(target)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # pre-JSON stamp or a torn write
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_tdx_stamp(target: Path, covered_through: str) -> None:
+    _tdx_stamp(target).write_text(
+        json.dumps({"downloaded_on": _bj_date(), "covered_through": covered_through}),
+        encoding="utf-8",
+    )
+
+
+def _tdx_cache_covers(target: Path, trade_date: str) -> bool:
+    if not target.exists() or target.stat().st_size == 0:
+        return False
+    stamp = _read_tdx_stamp(target)
+    covered = str(stamp.get("covered_through") or "")
+    if trade_date and covered and covered >= trade_date:
+        return True
+    # The package is rebuilt once per trading day; a second download on the
+    # same Beijing day would return the same file.
+    return str(stamp.get("downloaded_on") or "") == _bj_date()
+
+
+def _download_tdx(market: str, cache_dir: Path, trade_date: str) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / f"{market}lday.zip"
-    stamp = target.with_suffix(".stamp")
-    fresh = target.exists() and stamp.exists() and (_dt.date.today() - _dt.date.fromtimestamp(stamp.stat().st_mtime)).days < 1
-    if fresh:
+    if _tdx_cache_covers(target, trade_date):
         return target
-    resp = request("exchange", "GET", _TDX.format(market=market), expect_json=False, timeout=180, retries=1)
-    target.write_bytes(resp.encode("latin-1") if isinstance(resp, str) else resp)
-    stamp.write_text(_dt.datetime.now().isoformat(), encoding="utf-8")
+    url = _TDX.format(market=market)
+    resp = fetch("exchange", "GET", url, timeout=180, retries=1, allow_status=(404,))
+    if resp.status_code == 404:
+        raise TickHubError("QFSD-9003", f"通达信 {market} 盘后包不存在（HTTP 404）：{url}", detail={"url": url})
+    # A text round-trip used to corrupt the archive; keep the bytes and reject
+    # an error page before it reaches the cache.
+    if not resp.content.startswith(b"PK\x03\x04"):
+        raise TickHubError(
+            "QFSD-9003",
+            f"通达信 {market} 盘后包不是 zip（HTTP {resp.status_code}，{len(resp.content)} 字节），可能是错误页",
+            detail={"url": url},
+        )
+    part = target.with_suffix(target.suffix + ".part")
+    part.write_bytes(resp.content)
+    part.replace(target)
+    _write_tdx_stamp(target, "")
     return target
 
 
-@tool("tdx_daily_package", layer="quotes", ttl="semi_static", cache_domain="tdx")
-def tdx_daily_package(date: str = "", market: str = "all", download_dir: str = "") -> dict[str, Any]:
-    """Whole-market daily bars for one trading day from the TDX after-hours package."""
-    trade_date = require_date(date or None, None)
-    markets = ["sh", "sz", "bj"] if market in ("all", "") else [market.lower()]
-    cache_dir = Path(download_dir or "./data/tdx")
-    out: list[dict[str, Any]] = []
-    for mkt in markets:
-        if mkt not in {"sh", "sz", "bj"}:
-            raise TickHubError("QFSD-9001", f"unknown market: {mkt}")
-        path = _download_tdx(mkt, cache_dir)
+def _read_tdx_package(path: Path, market: str, trade_date: str) -> tuple[list[dict[str, Any]], str]:
+    """Rows for ``trade_date`` plus the newest date the package holds."""
+    rows: list[dict[str, Any]] = []
+    latest = ""
+    try:
         with zipfile.ZipFile(path) as zf:
             for info in zf.infolist():
                 name = info.filename.replace("\\", "/").split("/")[-1]
                 if not name.endswith(".day"):
                     continue
                 code = name[:-4]
-                if not (len(code) == 8 and code[:2] in {"sh", "sz", "bj"}):
-                    continue
-                if code[:2] != mkt:
+                if len(code) != 8 or code[:2] not in _TDX_MARKETS or code[:2] != market:
                     continue
                 blob = zf.read(info)
-                if len(blob) < 32:
+                if len(blob) < _DAY_RECORD:
                     continue
-                rec = _parse_day_record(blob[-32:])
-                if trade_date and rec["date"] != trade_date:
+                latest = max(latest, _package_latest(blob))
+                rec = _day_record_for(blob, trade_date)
+                if rec is None:
                     continue
-                rec["code"] = code[2:]
-                rec["market"] = mkt.upper()
-                out.append(
+                rows.append(
                     {
-                        "code": rec["code"],
-                        "market": rec["market"],
+                        "code": code[2:],
+                        "market": market.upper(),
+                        "is_index": _is_index_code(market, code[2:]),
                         "date": rec["date"],
                         "open": rec["open"],
                         "high": rec["high"],
@@ -457,8 +539,80 @@ def tdx_daily_package(date: str = "", market: str = "all", download_dir: str = "
                         "volume": rec["volume"],
                     }
                 )
-    out.sort(key=lambda r: r["amount"] or 0, reverse=True)
-    return ok({"date": trade_date, "rows": out}, "exchange", extra={"count": len(out)})
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, zlib.error) as exc:
+        # The cache is ours and corrupt: drop it so the next call re-downloads
+        # instead of failing forever on the same file.
+        path.unlink(missing_ok=True)
+        _tdx_stamp(path).unlink(missing_ok=True)
+        raise TickHubError(
+            "QFSD-9003",
+            f"通达信 {market} 盘后包损坏（{path.name}：{exc.__class__.__name__}），缓存已删除，请重试",
+            detail={"file": path.name},
+        ) from exc
+    return rows, latest
+
+
+@tool("tdx_daily_package", layer="quotes", ttl="semi_static", cache_domain="tdx")
+def tdx_daily_package(date: str = "", market: str = "all", download_dir: str = "") -> dict[str, Any]:
+    """Whole-market daily bars for one trading day from the TDX after-hours package."""
+    # Empty ``date`` means "newest trade date in the package"; falling back to
+    # the wall clock turns a weekend or holiday request into an empty answer.
+    wanted = require_date(date or None, None) if str(date or "").strip() else ""
+    markets = list(_TDX_MARKETS) if market in ("all", "") else [market.lower()]
+    for mkt in markets:
+        if mkt not in _TDX_MARKETS:
+            raise TickHubError("QFSD-9001", f"unknown market: {mkt}")
+    cache_dir = Path(download_dir or "./data/tdx")
+
+    packages: dict[str, Path] = {}
+    missing: list[str] = []
+    for mkt in markets:
+        try:
+            packages[mkt] = _download_tdx(mkt, cache_dir, wanted)
+        except TickHubError:
+            # The BSE package is not always published with the TDX mirror; an
+            # all-market request should not fail over one missing archive.
+            if mkt == "bj" and len(markets) > 1:
+                missing.append(mkt)
+                continue
+            raise
+
+    rows: list[dict[str, Any]] = []
+    latest: dict[str, str] = {mkt: "" for mkt in packages}
+    if wanted:
+        for mkt, path in packages.items():
+            mkt_rows, latest[mkt] = _read_tdx_package(path, mkt, wanted)
+            rows.extend(mkt_rows)
+    else:
+        for mkt, path in packages.items():
+            _, latest[mkt] = _read_tdx_package(path, mkt, "")
+        wanted = max(latest.values(), default="")
+        if not wanted:
+            raise TickHubError("QFSD-9003", "通达信盘后包里没有任何日线记录")
+        for mkt, path in packages.items():
+            mkt_rows, _ = _read_tdx_package(path, mkt, wanted)
+            rows.extend(mkt_rows)
+    for mkt, path in packages.items():
+        _write_tdx_stamp(path, latest[mkt])
+
+    newest = max(latest.values(), default="")
+    missing_date = bool(not rows and newest and newest != wanted)
+    note = ""
+    if missing_date:
+        note = f"盘后包最新到 {newest}，没有 {wanted} 的日线（非交易日，或当日包尚未生成）"
+    elif not rows:
+        note = f"盘后包里没有 {wanted} 的日线（非交易日）"
+    extra: dict[str, Any] = {"count": len(rows), "data_as_of": wanted if rows else (newest or wanted)}
+    if missing_date:
+        extra["degraded"] = "tdx_package_stale"
+    if missing:
+        extra["degraded"] = extra.get("degraded") or "tdx_package_missing"
+        extra["missing_markets"] = missing
+        note = f"{note}；缺 {'/'.join(missing)} 盘后包" if note else f"缺 {'/'.join(missing)} 盘后包"
+    if note:
+        extra["note"] = note
+    rows.sort(key=lambda r: (r["is_index"], -(r["amount"] or 0)))
+    return ok({"date": wanted, "rows": rows}, "exchange", extra=extra)
 
 
 @tool("tencent_market_snapshot", layer="quotes", ttl="realtime", cache_domain="quote")

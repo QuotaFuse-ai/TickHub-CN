@@ -8,8 +8,9 @@ cost and makes zero model calls.
 
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ class GatewayConfig:
     api_key: str = ""
     default_model: str = ""
     routing: dict[str, str] = field(default_factory=dict)
+    prompt: str = ""
     config_path: str = "./model_gateway.toml"
     error: str | None = None
 
@@ -42,54 +44,92 @@ class GatewayConfig:
             "api_key": "***" if self.api_key else "",
             "default_model": self.default_model,
             "routing": dict(self.routing),
+            "prompt": self.prompt,
             "config_path": self.config_path,
             "error": self.error,
         }
 
 
-def _load_file(path: Path) -> dict[str, Any]:
+def _load_file(path: Path) -> tuple[dict[str, Any], str | None]:
+    """Return ``(table, error)``; a malformed file must never break the server."""
     if not path.exists() or toml is None:
-        return {}
+        return {}, None
     try:
-        return toml.loads(path.read_text(encoding="utf-8")).get("model_gateway", {}) or {}
-    except Exception as exc:  # malformed config must never break the server
+        return toml.loads(path.read_text(encoding="utf-8")).get("model_gateway", {}) or {}, None
+    except Exception as exc:
         get_logger("gateway").warning(
             "model gateway config invalid", extra={"error": str(exc), "error_code": "QFSD-3001"}
         )
-        return {}
+        return {}, str(exc)[:200]
 
 
 def load_gateway_config() -> GatewayConfig:
     settings = get_settings()
     path = Path(settings.model_gateway_config_path or "./model_gateway.toml")
-    file_conf = _load_file(path)
+    file_conf, error = _load_file(path)
+    cleaning = file_conf.get("cleaning") or {}
     enable = settings.model_gateway_enable or bool(file_conf.get("enable"))
-    base_url = settings.model_gateway_base_url or str(file_conf.get("base_url") or "")
-    api_key = settings.model_gateway_api_key or str(file_conf.get("api_key") or "")
+    # MODEL_GATEWAY_* is the current name; CRAWL4AI_* kept as a legacy alias.
+    base_url = (
+        settings.model_gateway_base_url
+        or settings.crawl4ai_base_url
+        or str(file_conf.get("base_url") or "")
+    )
+    api_key = (
+        settings.model_gateway_api_key
+        or settings.crawl4ai_api_key
+        or str(file_conf.get("api_key") or "")
+    )
     default_model = settings.model_gateway_default_model or str(file_conf.get("default_model") or "")
     routing = {
         str(k): str(v) for k, v in (file_conf.get("routing") or {}).items() if v
     }
-    # Env-var routing overrides for the two documented purposes.
-    if settings.crawl4ai_model:
-        routing.setdefault("text_clean", settings.crawl4ai_model)
+    # An explicitly set CRAWL4AI_MODEL overrides routing; the field has an
+    # empty default so it cannot shadow a model chosen in the config file.
+    env_model = os.environ.get("CRAWL4AI_MODEL", "").strip()
+    if env_model:
+        routing["text_clean"] = env_model
+    prompt = str(cleaning.get("prompt") or file_conf.get("prompt") or "")
     return GatewayConfig(
         enable=enable,
         base_url=base_url,
         api_key=api_key,
         default_model=default_model,
         routing=routing,
+        prompt=prompt,
         config_path=str(path),
+        error=error,
     )
 
 
-@lru_cache(maxsize=1)
+# The admin console runs in its own process, so a cached config would keep the
+# MCP server on the old switch until restart. Keying the cache on the file's
+# mtime/size lets a UI save take effect everywhere within one call.
+_CACHE_LOCK = threading.Lock()
+_CACHE: tuple[tuple[int, int] | None, GatewayConfig] | None = None
+
+
 def get_gateway_config() -> GatewayConfig:
-    return load_gateway_config()
+    global _CACHE
+    path = Path(get_settings().model_gateway_config_path or "./model_gateway.toml")
+    try:
+        stat = path.stat()
+        key: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        key = None
+    with _CACHE_LOCK:
+        if _CACHE is not None and _CACHE[0] == key:
+            return _CACHE[1]
+    conf = load_gateway_config()
+    with _CACHE_LOCK:
+        _CACHE = (key, conf)
+    return conf
 
 
 def reload_gateway_config() -> GatewayConfig:
-    get_gateway_config.cache_clear()
+    global _CACHE
+    with _CACHE_LOCK:
+        _CACHE = None
     return get_gateway_config()
 
 

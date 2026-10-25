@@ -12,12 +12,14 @@ archive's ``crawl_task`` table; this module only carries the operational state
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import threading
 import time
 from typing import Any
 
 from ..logging.setup import get_logger
 from .jobs import TASKS, run_task
+from .store import get_archive
 
 HISTORY_LIMIT = 50
 ACTIVE_STATUSES = ("queued", "running")
@@ -275,6 +277,59 @@ def get_job(job_id: int) -> dict[str, Any]:
     return job.snapshot()
 
 
+def archive_jobs(limit: int = 20) -> list[dict[str, Any]]:
+    """Finished archive rows that no in-process job is already showing.
+
+    ``run_task`` writes every run to ``crawl_task``, so the archive outlives the
+    process; skipping covered rows keeps the console from listing a run twice.
+    A damaged archive must not take the live view down with it.
+    """
+    with _LOCK:
+        snapshots = [_JOBS[job_id].snapshot() for job_id in _JOBS]
+        live = _running_locked() is not None
+    covered = {
+        int(snap["result"]["task_id"])
+        for snap in snapshots
+        if snap.get("result") and snap["result"].get("task_id")
+    }
+    try:
+        rows = get_archive().tasks(limit=max(1, int(limit)))
+    except Exception:  # noqa: BLE001 - history is auxiliary
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        task_id = int(row.get("id") or 0)
+        if task_id in covered:
+            continue
+        status = str(row.get("status") or "")
+        if live and status in ACTIVE_STATUSES:
+            continue  # the in-memory job is rendering this run
+        detail = row.get("detail")
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except ValueError:
+                detail = {}
+        detail = detail if isinstance(detail, dict) else {}
+        out.append(
+            {
+                "archive_id": task_id,
+                "task": row.get("task"),
+                "status": status,
+                "codes": detail.get("codes"),
+                "days": detail.get("days"),
+                "started_at": row.get("started_at"),
+                "finished_at": row.get("finished_at"),
+                "elapsed_s": detail.get("elapsed_s", 0),
+                "fetched": int(row.get("fetched") or 0),
+                "inserted": int(row.get("inserted") or 0),
+                "error": str(row.get("error") or ""),
+                "archived": True,
+            }
+        )
+    return out
+
+
 def running_job() -> dict[str, Any] | None:
     with _LOCK:
         job = _running_locked()
@@ -326,6 +381,7 @@ __all__ = [
     "HISTORY_LIMIT",
     "JobBusy",
     "JobNotFound",
+    "archive_jobs",
     "cancel_job",
     "get_job",
     "list_jobs",
