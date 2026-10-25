@@ -25,9 +25,11 @@
 ---
 
 <p align="center">
+  <a href="#zero-key">30 秒上手</a> ·
+  <a href="#compare">为什么选它</a> ·
   <a href="#features">特性</a> ·
   <a href="#architecture">架构</a> ·
-  <a href="#quickstart">快速开始</a> ·
+  <a href="#quickstart">完整安装</a> ·
   <a href="#clients">接入方式</a> ·
   <a href="#skill">Skill</a> ·
   <a href="#layers">数据覆盖</a> ·
@@ -41,6 +43,9 @@ TickHub-CN（A股数据枢纽）只做一件事：**把 A 股数据变成模型�
 行情、财报、资金、公告、研报、宏观、指数、期货、期权、可转债，全部由服务端抓取、
 归一化、缓存，并带上来源与时间戳，而不是让模型回忆或估算。
 
+**只想先看它能不能出数？** 跳到 [30 秒上手](#zero-key)：两条命令，零密钥，直接拿到浦发银行的实时价。
+**在想为什么不用 akshare 或自己调接口？** 看 [对比表](#compare)，一张表说清取舍。
+
 - 124 个规范工具 + 25 个兼容别名 = **149 个 MCP 名称**，分 14 层。
 - 核心数据源**不需要 API Key、不需要账号、不需要验证码**；可选源用环境变量开启。
 - Redis 可选：没有 Redis 时自动降级为进程内缓存，并以 `QFSD-2001` 提示，不会失败。
@@ -49,11 +54,79 @@ TickHub-CN（A股数据枢纽）只做一件事：**把 A 股数据变成模型�
 
 ---
 
+<a id="zero-key"></a>
+
+## 30 秒上手（零密钥）
+
+<p align="center">
+  <img src="https://img.shields.io/badge/%E9%9B%B6%E5%AF%86%E9%92%A5-%E6%97%A0%E9%9C%80%E6%B3%A8%E5%86%8C%20%C2%B7%20%E6%97%A0%E9%9C%80API%20Key-critical?style=for-the-badge" alt="零密钥：无需注册 · 无需 API Key">
+</p>
+
+**这一步没有任何密钥。** 不注册、不申请 AppID、不填 token、不配代理，复制下面两行就出数：
+
+```bash
+pip install https://github.com/QuotaFuse-ai/TickHub-CN/releases/download/v0.1.1/tickhub_cn-0.1.1-py3-none-any.whl
+th-cn stock info 600000
+```
+
+第二条命令的真实返回（2026-10-26 实网抓取，节选）：
+
+```json
+{
+  "ok": true,
+  "data": { "code": "600000", "name": "浦发银行", "pe": 6.2, "pb": 0.42, "total_market_cap": 317405000000.0 },
+  "meta": { "source": "tencent", "fetched_at": "2026-10-26T01:02:10+08:00", "cache_hit": false, "confidence": "A", "trace_id": "64f6f897e10c4f82" }
+}
+```
+
+同一套工具，换个名字就能取别的东西：
+
+```bash
+th-cn tool call tencent_quote --params '{"codes":"sh600000"}' --fields code,name,price,change_pct
+th-cn tool call tencent_kline --params '{"code":"sh600000","period":"daily","limit":5}'
+th-cn tool list --help        # 149 个名称都在这里
+th-cn doctor                  # 环境、缓存后端、数据源体检
+```
+
+> 为什么能这么快：**① 零密钥** —— 安装完就结束，没有任何登录/授权步骤；
+> **② 行情走腾讯源** —— 不封 IP，不需要代理；**③ Redis 可选** —— 没装 Redis 自动用进程内缓存。
+>
+> PyPI 尚未发布，所以安装地址指向 GitHub Release（版本更新后文件名里的版本号会变，
+> 以 [Releases](https://github.com/QuotaFuse-ai/TickHub-CN/releases) 页为准）。
+> 想从源码装、带管理台或开发依赖，见 [完整安装](#quickstart)。
+
+---
+
+<a id="compare"></a>
+
+## 为什么选它：对比 akshare / 直接调 API
+
+一句话：**akshare 给你更多接口，直接调 API 给你更多自由，TickHub-CN 给你「模型不写代码也能取到带出处的数」。**
+
+| 维度 | TickHub-CN | akshare | 直接调东财 / 腾讯等接口 | Tushare / 聚宽等 Key 型 API |
+| --- | --- | --- | --- | --- |
+| 调用方式 | MCP 工具（模型直接调）、CLI、Python，共用一套返回 | Python 函数，需要自己写脚本 | 自己拼 URL、带 UA/cookie、自己解析 | SDK + token，仍然要写代码 |
+| 鉴权 | **零密钥**，装完即用 | 零密钥 | 零密钥，但签名与请求头要自己维护 | 注册 token，部分接口按积分/付费 |
+| 返回结构 | 统一 envelope：`ok / data / meta{source, fetched_at, confidence, trace_id}` | 每个函数一套 DataFrame，字段随源变化 | 原始 JSON，字段随源站改版而变 | 统一，但有版本差异 |
+| 稳定性处理 | 内置分组限流、熔断、多源切换、旧缓存兜底、代理池 | 基本没有，失败需自己重试 | 全部自己扛（封 IP、字段改名） | 官方保障 |
+| 覆盖广度 | 149 个名称 / 14 层，聚焦 A 股高频场景 | 上千个接口，广度最大 | 取决于愿意逆向多少 | 偏基本面与行情 |
+| 部署 | 一个 wheel，Python 3.11+，无需浏览器 | `pip install` + pandas | 无需依赖，但要自己写爬虫 | 需要 SDK 与网络鉴权 |
+| 许可 / 成本 | Apache-2.0，免费 | MIT，免费 | 免费，但维护成本高 | 免费额度 + 付费/积分 |
+| 最适合 | AI Agent、自动化取数、不想写爬虫 | 数据探索、研究、需要广度 | 深度定制、只取一两个接口 | 需要 SLA 或合规授权的团队 |
+
+**边界也写清楚**：上游同样是公开接口，源站改版仍要跟进；覆盖广度不如 akshare；
+不是交易所授权行情，不建议用于合规披露或实盘交易决策。
+选它的理由只有一条 —— **把「取数」从写代码变成一次工具调用，并且每个数字都带来源和时间。**
+
+---
+
 ## 目录
 
+- [30 秒上手（零密钥）](#zero-key)
+- [为什么选它（对比）](#compare)
 - [特性](#features)
 - [架构](#architecture)
-- [快速开始](#quickstart)
+- [快速开始（完整安装）](#quickstart)
 - [接入方式（MCP / CLI / Python）](#clients)
 - [Skill 用法](#skill)
 - [数据覆盖（14 层，149 个名称）](#layers)
@@ -130,9 +203,9 @@ Python API ───┘        ├─► 限流 / 熔断 / 代理池 / 重试
 
 <a id="quickstart"></a>
 
-## 快速开始
+## 快速开始（完整安装）
 
-**3 步，2 分钟。**
+**3 步，2 分钟。** 只想要最快那条路？[30 秒上手](#zero-key) 两条命令即可。
 
 ```bash
 # 1. 安装（仓库方式）
@@ -140,7 +213,7 @@ git clone https://github.com/QuotaFuse-ai/TickHub-CN.git
 cd TickHub-CN
 python -m venv .venv
 . .venv/bin/activate                 # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"              # 或直接 pip install tickhub-cn
+pip install -e ".[dev]"              # 也可直接装 Release 里的 wheel，见 30 秒上手
 
 # 2. 自检（环境 + 缓存后端 + 数据源）
 th-cn doctor
