@@ -64,13 +64,49 @@ def _pdf_bytes(lines: list[str]) -> bytes:
 def test_a_real_pdf_yields_one_text_block_per_page() -> None:
     pages, engine = financials._pdf_pages(_pdf_bytes(["First page body", "Second page body"]))
 
-    assert engine in {"pypdf", "pdftotext"}
+    assert engine in {"pypdf", "pdfminer", "pdftotext"}
     assert len(pages) == 2
     assert "Second page body" in pages[1]
 
 
+def test_a_readable_pypdf_result_skips_the_fallback_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(financials, "_pdfminer_pages", lambda blob: pytest.fail("pdfminer should not run"))
+    monkeypatch.setattr(financials, "_pdftotext_pages", lambda blob: pytest.fail("pdftotext should not run"))
+
+    pages, engine = financials._pdf_pages(_pdf_bytes(["First page body", "Second page body"]))
+
+    assert engine == "pypdf"
+    assert len(pages) == 2
+
+
+def test_a_legacy_cid_font_falls_back_to_pdfminer(monkeypatch: pytest.MonkeyPatch) -> None:
+    mojibake = ["ᅱഅၿྛٺܢႵ܋܄ඳ" * 400] * 4
+    readable = ["财务报表附注 合并财务报表项目注释" * 200] * 4
+    monkeypatch.setattr(financials, "_pypdf_pages", lambda blob: mojibake)
+    monkeypatch.setattr(financials, "_pdfminer_pages", lambda blob: readable)
+    monkeypatch.setattr(financials, "_pdftotext_pages", lambda blob: pytest.fail("pdftotext is the last resort"))
+
+    pages, engine = financials._pdf_pages(b"%PDF-1.4")
+
+    assert engine == "pdfminer"
+    assert pages == readable
+
+
+def test_when_every_engine_is_unreadable_the_pdfminer_text_survives(monkeypatch: pytest.MonkeyPatch) -> None:
+    mojibake = ["ᅱഅၿྛٺܢႵ܋܄ඳ" * 400] * 4
+    monkeypatch.setattr(financials, "_pypdf_pages", lambda blob: mojibake)
+    monkeypatch.setattr(financials, "_pdfminer_pages", lambda blob: mojibake)
+    monkeypatch.setattr(financials, "_pdftotext_pages", lambda blob: mojibake)
+
+    pages, engine = financials._pdf_pages(b"%PDF-1.4")
+
+    assert engine == "pdfminer"
+    assert financials._text_layer_readable(pages) is False
+
+
 def test_without_any_engine_the_error_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setitem(sys.modules, "pdfminer.high_level", None)
     monkeypatch.setattr(financials.shutil, "which", lambda _name: None)
 
     with pytest.raises(TickHubError) as excinfo:
@@ -138,6 +174,28 @@ def test_a_chapter_opening_wins_over_a_cross_reference_on_another_page() -> None
     assert out["start_page"] == 19
 
 
+def test_a_footer_heading_wins_over_mid_page_cross_references() -> None:
+    """Bank annual reports print the chapter name in the running footer."""
+    pages = [f"第 {i} 页 正文" for i in range(40)]
+    pages[13] = "正文" * 200 + "本行财务报表附注由安永审计。" + "正文" * 200
+    pages[19] = "正文" * 200 + "第八章 财务报告 财务报表附注"
+
+    out = financials._notes_excerpt(pages, 5000)
+
+    assert out["start_page"] == 20
+    assert out["text"].startswith("正文" * 200 + "第八章 财务报告 财务报表附注")
+
+
+def test_a_heading_split_across_text_containers_still_matches() -> None:
+    pages = [f"第 {i} 页 正文" for i in range(12)]
+    pages[8] = "第八章 财务报告\r\n  财务报表\n附注"
+
+    out = financials._notes_excerpt(pages, 5000)
+
+    assert out["found"] is True
+    assert out["start_page"] == 9
+
+
 def test_a_legacy_cid_font_is_reported_as_unreadable() -> None:
     mojibake = ["ᅱഅၿྛٺܢႵཋ܄ඳ" * 400] * 4
     readable = ["招商银行股份有限公司 2025 年度报告 财务报表附注" * 50] * 4
@@ -145,6 +203,7 @@ def test_a_legacy_cid_font_is_reported_as_unreadable() -> None:
     assert financials._text_layer_readable(mojibake) is False
     assert financials._text_layer_readable(readable) is True
     assert financials._text_layer_readable(["短文"]) is True
+    assert financials._text_layer_readable(["", "  \n"]) is False
 
 
 def test_the_excerpt_is_cut_to_chars() -> None:
@@ -222,6 +281,19 @@ def test_an_unreadable_text_layer_degrades_distinctly(monkeypatch: pytest.Monkey
     assert out["data"]["reports"][0]["title"] == "2025年年度报告"
     assert out["meta"]["degraded"] == "notes_text_layer_unreadable"
     assert "Adobe-GB1" in out["meta"]["note"]
+
+
+def test_a_scanned_pdf_is_reported_as_needing_ocr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(announcements, "_cninfo_rows", _fake_rows)
+    monkeypatch.setattr(financials, "fetch", lambda *a, **k: type("R", (), {"content": b"%PDF-1.4"})())
+    monkeypatch.setattr(financials, "_pdf_pages", lambda blob: (["", "  "], "pdfminer"))
+
+    out = financials.cninfo_financial_notes("600036", extract=True)
+    notes = out["data"]["notes"]
+
+    assert (notes["found"], notes["unreadable"]) == (False, True)
+    assert "扫描件" in notes["reason"]
+    assert out["meta"]["degraded"] == "notes_text_layer_unreadable"
 
 
 def test_a_pdf_failure_degrades_but_keeps_the_locator(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,9 +39,10 @@ sources-legacy = ["mootdx>=0.11"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 all = ["tickhub-cn[admin,db,sources]"]
 docx = ["python-docx>=1.1"]
-# cninfo_financial_notes(extract=true) reads the annual-report PDF; without pypdf
-# it falls back to a system pdftotext, and without either it stays a locator.
-notes = ["pypdf>=4.0"]
+# cninfo_financial_notes(extract=true) reads the annual-report PDF; pypdf is the
+# fast path, pdfminer.six ships the Adobe-GB1 CMaps that legacy CID fonts need,
+# and a system pdftotext is the last resort. Without any of them it stays a locator.
+notes = ["pypdf>=4.0", "pdfminer.six>=20231228"]
 
 [project.scripts]
 th-cn = "tickhub_cn.cli.main:main"

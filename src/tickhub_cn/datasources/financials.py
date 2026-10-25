@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import io
+import logging
 import re
 import shutil
 import subprocess
@@ -553,14 +554,35 @@ _PDF_MAX_PAGES = 400
 # notes chapter itself is headed 「合并财务报表项目注释」 in most annual reports.
 _NOTES_HEADINGS = ("合并财务报表项目注释", "财务报表项目注释", "财务报表附注", "财务报告")
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
-def _pdf_pages(blob: bytes) -> tuple[list[str], str]:
-    """Page texts for a PDF blob, plus the engine that produced them."""
+
+def _text_layer_readable(pages: list[str]) -> bool:
+    """False when the PDF has no text layer, or its fonts carry no Unicode map.
+
+    Annual reports typeset with a legacy Adobe-GB1 CID font extract as pages of
+    Latin/Hangul code points when the engine lacks the CID-to-Unicode table;
+    a scanned report extracts as nothing at all.
+    """
+    text = "".join(pages)
+    if not text.strip():
+        return False
+    if len(text) < 2000:
+        return True
+    return len(_CJK_RE.findall(text)) / len(text) >= 0.02
+
+
+def _pypdf_pages(blob: bytes) -> list[str] | None:
     try:
         from pypdf import PdfReader  # type: ignore[import-not-found]
     except ImportError:
-        PdfReader = None  # noqa: N806 - mirrors the optional import
-    if PdfReader is not None:
+        return None
+    # pypdf warns once per font it cannot decode without fontTools; a legacy CID
+    # report emits hundreds of these and drowns the server log.
+    pypdf_log = logging.getLogger("pypdf")
+    level = pypdf_log.level
+    pypdf_log.setLevel(logging.ERROR)
+    try:
         reader = PdfReader(io.BytesIO(blob))
         pages: list[str] = []
         for page in reader.pages[:_PDF_MAX_PAGES]:
@@ -568,13 +590,33 @@ def _pdf_pages(blob: bytes) -> tuple[list[str], str]:
                 pages.append(page.extract_text() or "")
             except Exception:  # noqa: BLE001 - one broken page must not sink the report
                 pages.append("")
-        return pages, "pypdf"
+        return pages
+    except Exception:  # noqa: BLE001 - another engine may still parse the file
+        return None
+    finally:
+        pypdf_log.setLevel(level)
+
+
+def _pdfminer_pages(blob: bytes) -> list[str] | None:
+    """Page texts via pdfminer.six, which bundles the Adobe-GB1 UCS-2 table."""
+    try:
+        from pdfminer.high_level import extract_text  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        text = extract_text(io.BytesIO(blob), maxpages=_PDF_MAX_PAGES)
+    except Exception:  # noqa: BLE001 - treated as "engine unavailable"
+        return None
+    pages = text.split("\f")
+    while pages and not pages[-1].strip():
+        pages.pop()
+    return pages or None
+
+
+def _pdftotext_pages(blob: bytes) -> list[str] | None:
     exe = shutil.which("pdftotext")
     if not exe:
-        raise TickHubError(
-            "QFSD-9006",
-            "PDF 正文解析需要 pypdf（pip install 'tickhub-cn[notes]'）或系统 pdftotext",
-        )
+        return None
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "report.pdf"
         src.write_bytes(blob)
@@ -588,22 +630,51 @@ def _pdf_pages(blob: bytes) -> tuple[list[str], str]:
             detail = proc.stderr.decode("utf-8", "ignore").strip()[:200]
             raise TickHubError("QFSD-9006", f"pdftotext 解析失败: {detail}")
         text = out.read_text("utf-8", errors="ignore")
-    return text.split("\f"), "pdftotext"
+    return text.split("\f")
 
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+def _pdf_pages(blob: bytes) -> tuple[list[str], str]:
+    """Page texts for a PDF blob, plus the engine that produced them.
 
-
-def _text_layer_readable(pages: list[str]) -> bool:
-    """False when the PDF's fonts carry no Unicode map.
-
-    Annual reports typeset with a legacy Adobe-GB1 CID font extract as pages of
-    Latin/Hangul code points instead of Chinese, whichever engine reads them.
+    pypdf is fastest but carries no Adobe-GB1 table; pdfminer.six does and is
+    the fallback for reports set in legacy CID fonts. pdftotext comes last
+    because the copy shipped with Git for Windows is Xpdf 4.0 without CJK CMaps.
     """
-    text = "".join(pages)
-    if len(text) < 2000:
-        return True
-    return len(_CJK_RE.findall(text)) / len(text) >= 0.02
+    unreadable: list[tuple[list[str], str]] = []
+    for reader, engine in ((_pypdf_pages, "pypdf"), (_pdfminer_pages, "pdfminer")):
+        pages = reader(blob)
+        if not pages:
+            continue
+        if _text_layer_readable(pages):
+            return pages, engine
+        unreadable.append((pages, engine))
+
+    text_error: TickHubError | None = None
+    try:
+        text_pages = _pdftotext_pages(blob)
+    except TickHubError as exc:
+        text_pages, text_error = None, exc
+    if text_pages:
+        if _text_layer_readable(text_pages):
+            return text_pages, "pdftotext"
+        unreadable.append((text_pages, "pdftotext"))
+
+    if unreadable:
+        # Every engine produced mojibake: hand back the CMap-aware one and let
+        # the caller flag the text layer as unreadable.
+        return next((item for item in unreadable if item[1] == "pdfminer"), unreadable[0])
+    if text_error is not None:
+        raise text_error
+    raise TickHubError(
+        "QFSD-9006",
+        "PDF 正文解析需要 pypdf 或 pdfminer.six（pip install 'tickhub-cn[notes]'），"
+        "或系统 pdftotext",
+    )
+
+
+def _squash(text: str) -> str:
+    """Drop whitespace so a heading split across text containers still matches."""
+    return "".join(text.split())
 
 
 def _notes_excerpt(pages: list[str], chars: int) -> dict[str, Any]:
@@ -615,15 +686,23 @@ def _notes_excerpt(pages: list[str], chars: int) -> dict[str, Any]:
     """
     total = len(pages)
     floor = max(3, total // 3)
+    flat = [_squash(text) for text in pages]
     for heading in _NOTES_HEADINGS:
-        hits = [i for i, text in enumerate(pages) if heading in text]
+        hits = [i for i, text in enumerate(flat) if heading in text]
         if not hits:
             continue
         after_toc = [i for i in hits if i >= floor] or hits
-        # A page that *opens* with the heading is the chapter itself; a hit deep
-        # inside a page is usually a cross-reference (the audit report cites the
-        # notes chapter well before it starts).
-        top = [i for i in after_toc if pages[i].find(heading) <= max(80, len(pages[i]) // 7)]
+        # The chapter page either *opens* with the heading or prints it in the
+        # running footer — bank annual reports put 「第八章 财务报告 财务报表附注」
+        # at the bottom of every chapter page. A hit in the middle of a page is
+        # usually a cross-reference: the audit report cites the notes chapter
+        # well before it starts.
+        top = [
+            i
+            for i in after_toc
+            if flat[i].find(heading) <= max(80, len(flat[i]) // 7)
+            or flat[i].rfind(heading) >= len(flat[i]) * 0.85
+        ]
         start = top[0] if top else after_toc[0]
         body = "\n".join(pages[start:]).strip()
         return {
@@ -654,10 +733,14 @@ def _extract_notes(report: dict[str, Any], chars: int) -> tuple[dict[str, Any], 
         return {"found": False, "reason": reason}, reason
     where = {"url": url, "title": report.get("title"), "engine": engine, "pages": len(pages)}
     if not _text_layer_readable(pages):
-        reason = (
-            "年报 PDF 的字体缺少 Unicode 映射（多为 Adobe-GB1 旧编码），"
-            "解析出的中文不可读；请直接打开 PDF 查阅附注"
-        )
+        if not "".join(pages).strip():
+            reason = "年报 PDF 没有文本层（扫描件），需 OCR 才能还原正文"
+        else:
+            reason = (
+                "年报 PDF 的字体缺少 Unicode 映射（多为 Adobe-GB1 旧编码），"
+                "pypdf、pdfminer.six 与 pdftotext 均未能还原中文；"
+                "请直接打开 PDF 查阅附注，或用 PaddleOCR/MinerU 一类工具识别"
+            )
         return {**where, "found": False, "unreadable": True, "reason": reason}, reason
     excerpt = _notes_excerpt(pages, chars)
     return {**where, **excerpt}, None
