@@ -65,7 +65,7 @@ TickHub-CN（A股数据枢纽）只做一件事：**把 A 股数据变成模型�
 **这一步没有任何密钥。** 不注册、不申请 AppID、不填 token、不配代理，复制下面两行就出数：
 
 ```bash
-pip install https://github.com/QuotaFuse-ai/TickHub-CN/releases/download/v0.1.1/tickhub_cn-0.1.1-py3-none-any.whl
+pip install https://github.com/QuotaFuse-ai/TickHub-CN/releases/download/v1.0.1/tickhub_cn-1.0.1-py3-none-any.whl
 th-cn stock info 600000
 ```
 

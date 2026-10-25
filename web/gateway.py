@@ -31,7 +31,7 @@ client = StockDataClient()
 
 app = FastAPI(
     title="TickHub-CN read-only gateway",
-    version="0.1.1",
+    version="1.0.1",
     description=(
         "Browser-facing adapter over a fixed allow-list of TickHub-CN reads. "
         "MCP-HTTP itself is JSON-RPC and must not be called directly from a page."

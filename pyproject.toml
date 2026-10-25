@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tickhub-cn"
-version = "0.1.1"
+version = "1.0.1"
 description = "TickHub-CN (A股数据枢纽): A-share data MCP server, CLI and local import library"
 readme = "README.md"
 license = { text = "Apache-2.0" }
