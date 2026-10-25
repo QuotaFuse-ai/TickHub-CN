@@ -339,7 +339,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 行情层（实时，不封 IP）
 
-<details>
+<details open>
 <summary><b>13 个工具</b> — 实时价 / K 线 / 逐笔 / ETF / 指数 / 全市场日线</summary>
 
 | 工具 | 参数 | 说明 |
@@ -366,7 +366,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 财报层
 
-<details>
+<details open>
 <summary><b>13 个工具</b> — 三大报表 / 指标 / 勾稽 / 股东 / 估值历史 / F10 / 附注</summary>
 
 | 工具 | 参数 | 说明 |
@@ -393,7 +393,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 盘面层
 
-<details>
+<details open>
 <summary><b>23 个工具</b> — 涨跌停池 / 龙虎榜 / 板块 / 情绪 / 异动 / ST / 热榜</summary>
 
 | 工具 | 参数 | 说明 |
@@ -430,7 +430,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 资金层
 
-<details>
+<details open>
 <summary><b>16 个工具</b> — 资金流 / 北向 / 两融 / 大宗 / 股东户数 / 分红 / 筹码 / ETF 份额</summary>
 
 | 工具 | 参数 | 说明 |
@@ -460,7 +460,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 宏观层
 
-<details>
+<details open>
 <summary><b>12 个工具</b> — GDP / CPI / PMI / 货币 / 社融 / LPR / 利率 / 日历</summary>
 
 | 工具 | 参数 | 说明 |
@@ -486,7 +486,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 公告层
 
-<details>
+<details open>
 <summary><b>9 个工具</b> — 巨潮 / 深交所 / 风险分类 / 新闻与快讯</summary>
 
 | 工具 | 参数 | 说明 |
@@ -509,7 +509,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 指数层
 
-<details>
+<details open>
 <summary><b>10 个工具</b> — 成分 / 权重 / 估值 / K 线 / 日历 / 申万</summary>
 
 | 工具 | 参数 | 说明 |
@@ -533,7 +533,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 期货层
 
-<details>
+<details open>
 <summary><b>7 个工具</b> — 国内期货 / 持仓 / 期权 / A50 / 上海金</summary>
 
 | 工具 | 参数 | 说明 |
@@ -554,7 +554,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 事件层
 
-<details>
+<details open>
 <summary><b>7 个工具</b> — 业绩预告 / 调研 / 增减持 / 回购 / 质押 / 解禁 / 打新</summary>
 
 | 工具 | 参数 | 说明 |
@@ -575,7 +575,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 研报层
 
-<details>
+<details open>
 <summary><b>6 个工具</b> — 个股 / 行业研报 / PDF / 一致预期 / 自然语言搜索</summary>
 
 | 工具 | 参数 | 说明 |
@@ -595,7 +595,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 舆情互动层
 
-<details>
+<details open>
 <summary><b>3 个工具</b> — 互动易 / 上证 e 互动 / 热门概念</summary>
 
 | 工具 | 参数 | 说明 |
@@ -612,7 +612,7 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 ### 期权 · 可转债 · 估值
 
-<details>
+<details open>
 <summary><b>5 个工具</b></summary>
 
 | 工具 | 参数 | 说明 |
