@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 import requests
 
@@ -61,6 +63,33 @@ def test_endpoint_limiter_is_one_call_per_25s():
     limiter = http_mod.endpoint_limiter("push2.eastmoney.com/api/qt/stock/get")
     assert limiter.min_interval == http_mod.ENDPOINT_MIN_INTERVAL == 25.0
     assert http_mod.ENDPOINT_BREAKER_SECONDS == 600.0
+
+
+def test_limiter_reports_the_wait_instead_of_sleeping_past_the_cap():
+    limiter = http_mod.RateLimiter(min_interval=25.0, max_calls=3, window=60)
+    limiter.acquire()
+    started = time.monotonic()
+    with pytest.raises(http_mod.RateLimitPaced) as paced:
+        limiter.acquire(max_wait=http_mod.ENDPOINT_MAX_WAIT)
+    assert time.monotonic() - started < 0.5
+    assert paced.value.retry_after > http_mod.ENDPOINT_MAX_WAIT
+
+
+def test_paced_endpoint_fails_fast_so_the_tool_can_fall_back(monkeypatch):
+    session = _ResetSession()
+    _offline(monkeypatch, session)
+    url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    http_mod.endpoint_limiter(http_mod.endpoint_family(url)).acquire()
+
+    started = time.monotonic()
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", url, retries=0)
+    assert time.monotonic() - started < 1.0
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["reason"] == "endpoint_paced"
+    assert err.value.detail["retry_after_s"] >= 20
+    assert session.calls == 0
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
 
 
 def test_first_reset_trips_breaker_without_retrying(monkeypatch):

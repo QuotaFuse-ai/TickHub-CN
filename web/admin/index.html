@@ -87,6 +87,16 @@
   .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
   #search { width: min(260px, 46vw); }
   #hits[hidden], tbody tr[hidden] { display: none; }
+  th[data-sortable] { cursor: pointer; user-select: none; }
+  th[data-sortable]:hover { color: var(--fg); }
+  .sort-arrow { font-size: 11px; color: var(--accent); }
+  th[aria-sort="none"] .sort-arrow { opacity: .35; }
+  .sort-note { margin: 6px 0 0; font-size: 12px; }
+  #search-results { margin: 12px 24px 0; padding: 12px 14px; border: 1px solid var(--line);
+                    border-radius: 10px; background: var(--soft); }
+  #search-results[hidden] { display: none; }
+  #search-results ul { margin: 6px 0 0; padding-left: 18px; }
+  #search-results li { margin: 3px 0; }
   kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 5px; background: var(--soft); font: 12px ui-monospace, Consolas, monospace; }
   .codes { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
@@ -117,11 +127,12 @@
   <span id="ro" class="badge" hidden></span>
   <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
     搜索
-    <input id="search" type="search" placeholder="过滤当前页表格（Ctrl+K）" autocomplete="off" />
+    <input id="search" type="search" placeholder="过滤当前页；回车搜索全部页面（Ctrl+K）" autocomplete="off" />
   </label>
   <span id="hits" class="badge" hidden></span>
   <span class="spacer"></span>
-  <button id="export" type="button" title="导出当前页表格为 CSV（Ctrl+E）">导出</button>
+  <button id="export" type="button" title="导出当前页表格为 CSV（Ctrl+E）">导出 CSV</button>
+  <button id="export-xlsx" type="button" title="导出当前页表格为 Excel（Ctrl+Shift+E）">导出 xlsx</button>
   <button id="theme" type="button" title="切换主题：自动 / 浅色 / 深色（Ctrl+J）">主题：自动</button>
   <button id="shortcut-button" type="button" title="快捷键与错误码释义（?）" aria-label="快捷键与错误码释义">?</button>
   <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
@@ -130,6 +141,8 @@
   </label>
   <button id="connect" class="primary" type="button">连接</button>
 </header>
+
+<div id="search-results" hidden></div>
 
 <div class="layout">
   <nav id="nav">
@@ -172,6 +185,8 @@ const state = {
   toolsView: null,
   mcpLayer: "",
   theme: localStorage.getItem("tickhub_admin_theme") || "auto",
+  keepSearch: false,
+  scanning: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -271,7 +286,10 @@ function post(path, body) {
   return api(path, { method: "POST", body: JSON.stringify(body || {}) });
 }
 
-function table(rows, columns) {
+// Table order has exactly one owner per table. Feeds the server already sorted
+// (logs / audit / risk events, newest first) pass {sort: false} and keep their
+// order; every other table is a snapshot and may be re-sorted by the reader.
+function table(rows, columns, opts = {}) {
   if (!Array.isArray(rows) || !rows.length) return "<p class='empty'>没有记录。</p>";
   const keys = columns || (() => {
     const out = [];
@@ -285,8 +303,55 @@ function table(rows, columns) {
   const body = rows.slice(0, 500).map((row) =>
     `<tr>${keys.map((k) => `<td>${esc(row ? row[k] : "")}</td>`).join("")}</tr>`).join("");
   const more = rows.length > 500 ? `<p class="muted">仅显示前 500 / ${rows.length} 行。</p>` : "";
-  return `<div class="scroll"><table><thead><tr>${keys.map((k) => `<th>${esc(k)}</th>`).join("")}</tr></thead>
-    <tbody>${body}</tbody></table></div>${more}`;
+  const sortable = opts.sort !== false;
+  const head = sortable
+    ? keys.map((k, i) => `<th data-sortable data-col="${i}" tabindex="0" aria-sort="none" title="点击按“${esc(k)}”排序">${esc(k)}<span class="sort-arrow"> ↕</span></th>`).join("")
+    : keys.map((k) => `<th>${esc(k)}</th>`).join("");
+  const note = opts.note ? `<p class="muted sort-note">${esc(opts.note)}</p>` : "";
+  return `<div class="scroll"><table${sortable ? ' class="sortable"' : ""}><thead><tr>${head}</tr></thead>
+    <tbody>${body}</tbody></table></div>${more}${note}`;
+}
+
+/* sort-core */
+function cellText(cell) {
+  return (cell && cell.textContent ? cell.textContent : "").replace(/\s+/g, " ").trim();
+}
+
+function isBlank(text) {
+  return text === "" || text === "—" || text === "-";
+}
+
+function compareCells(a, b) {
+  const na = Number(a);
+  const nb = Number(b);
+  if (a !== "" && b !== "" && Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a.localeCompare(b, "zh-CN", { numeric: true, sensitivity: "base" });
+}
+/* sort-core-end */
+
+function sortTable(table, column, header) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const desc = table.dataset.sortCol === String(column) && table.dataset.sortDir === "asc";
+  const dir = desc ? "desc" : "asc";
+  const rows = [...tbody.rows].sort((left, right) => {
+    const a = cellText(left.cells[column]);
+    const b = cellText(right.cells[column]);
+    const aBlank = isBlank(a);
+    const bBlank = isBlank(b);
+    if (aBlank || bBlank) return aBlank === bBlank ? 0 : (aBlank ? 1 : -1);  // blanks stay last
+    const cmp = compareCells(a, b);
+    return dir === "asc" ? cmp : -cmp;
+  });
+  tbody.append(...rows);
+  table.dataset.sortCol = String(column);
+  table.dataset.sortDir = dir;
+  table.querySelectorAll("th[data-sortable]").forEach((th) => {
+    const active = th === header;
+    th.setAttribute("aria-sort", active ? (dir === "asc" ? "ascending" : "descending") : "none");
+    const arrow = th.querySelector(".sort-arrow");
+    if (arrow) arrow.textContent = active ? (dir === "asc" ? " ▲" : " ▼") : " ↕";
+  });
 }
 
 function kv(rows) {
@@ -333,6 +398,9 @@ function applySearch() {
   let total = 0;
   let shown = 0;
 
+  const panel = $("#search-results");
+  if (panel && !panel.hidden && panel.dataset.query !== query) hideCrossResults();
+
   document.querySelectorAll("#view table").forEach((table) => {
     table.querySelectorAll("tbody tr").forEach((row) => {
       total += 1;
@@ -348,13 +416,86 @@ function applySearch() {
     return;
   }
   hits.hidden = false;
+  hits.title = "回车搜索其余页面";
   if (!total) {
-    hits.textContent = "当前页无表格";
+    hits.textContent = "当前页 0 行";
     hits.className = "badge";
     return;
   }
   hits.textContent = `匹配 ${shown} / ${total} 行`;
   hits.className = "badge " + (shown ? "ok" : "warn");
+}
+
+/* ------------------------------------------------------- cross-page scan */
+
+function routeLabel(route) {
+  const link = document.querySelector(`#nav a[data-route="${route}"]`);
+  return link ? link.textContent.trim() : route;
+}
+
+function hideCrossResults() {
+  const panel = $("#search-results");
+  if (!panel) return;
+  panel.hidden = true;
+  panel.innerHTML = "";
+  delete panel.dataset.query;
+}
+
+// Local filtering can only see the rendered route. On Enter we render every
+// other route off-screen and report where the query also matches; nothing is
+// written to the page or the server, so this is safe in read-only mode.
+async function scanRoutes() {
+  const query = $("#search").value.trim().toLowerCase();
+  const panel = $("#search-results");
+  if (!query) { hideCrossResults(); return; }
+  if (state.scanning) return;
+  state.scanning = true;
+  panel.hidden = false;
+  panel.dataset.query = query;
+  panel.innerHTML = "<p class='muted'>正在搜索其余页面…</p>";
+
+  const found = [];
+  try {
+    for (const route of ROUTES) {
+      if (route === currentRoute()) continue;  // already filtered in place
+      try {
+        const box = document.createElement("div");
+        box.innerHTML = await views[route]();
+        let rows = 0;
+        const samples = [];
+        box.querySelectorAll("table tbody tr").forEach((row) => {
+          const text = row.textContent;
+          if (!text.toLowerCase().includes(query)) return;
+          rows += 1;
+          if (samples.length < 2) samples.push(text.replace(/\s+/g, " ").trim().slice(0, 80));
+        });
+        const loose = !rows && box.textContent.toLowerCase().includes(query);
+        if (rows || loose) found.push({ route, rows, sample: samples.join(" · ") });
+      } catch (exc) {
+        found.push({ route, error: exc.message || String(exc) });
+      }
+    }
+  } finally {
+    state.scanning = false;
+  }
+
+  const current = [...document.querySelectorAll("#view table tbody tr")].filter((row) => !row.hidden).length;
+  const items = found.map((hit) => {
+    if (hit.error) {
+      return `<li>${esc(routeLabel(hit.route))} <span class="badge warn">读取失败</span>
+        <span class="muted">${esc(hit.error)}</span></li>`;
+    }
+    const count = hit.rows ? `${hit.rows} 行` : "命中非表格内容";
+    return `<li><a href="#/${esc(hit.route)}" data-cross-route="${esc(hit.route)}">${esc(routeLabel(hit.route))}</a>
+      <span class="badge ok">${esc(count)}</span> <span class="muted">${esc(hit.sample)}</span></li>`;
+  });
+  panel.innerHTML = `<div class="row" style="margin:0 0 4px;">
+      <b>跨页搜索“${esc(query)}”</b>
+      <span class="badge">当前页 ${current} 行</span>
+      <span class="spacer"></span>
+      <button type="button" data-action="search-close">关闭</button>
+    </div>
+    ${items.length ? `<ul>${items.join("")}</ul>` : "<p class='muted'>其余页面没有匹配内容。</p>"}`;
 }
 
 /* -------------------------------------------------------------- export */
@@ -364,8 +505,8 @@ function csvCell(value) {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function download(name, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+function download(name, data, mime = "text/csv;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([data], { type: mime }));
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
@@ -374,6 +515,21 @@ function download(name, text) {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast(`已导出 ${name}`);
+}
+
+function exportStamp() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-`
+    + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+// Header cells carry the sort arrow; exports want the label only.
+function headerText(th) {
+  const clone = th.cloneNode(true);
+  const arrow = clone.querySelector(".sort-arrow");
+  if (arrow) arrow.remove();
+  return clone.textContent.trim();
 }
 
 function exportView() {
@@ -385,7 +541,7 @@ function exportView() {
   tables.forEach((table, index) => {
     lines.push(`# 表 ${index + 1}`);
     const header = table.querySelector("thead tr");
-    if (header) lines.push([...header.children].map((th) => csvCell(th.textContent)).join(","));
+    if (header) lines.push([...header.children].map((th) => csvCell(headerText(th))).join(","));
     table.querySelectorAll("tbody tr").forEach((row) => {
       if (row.hidden) return;  // exported rows honour the active search
       lines.push([...row.children].map((td) => csvCell(td.textContent)).join(","));
@@ -398,11 +554,181 @@ function exportView() {
     lines.push(csvCell(text));
   }
 
+  download(`tickhub-${route}-${exportStamp()}.csv`, "\ufeff" + lines.join("\r\n"));
+}
+
+/* ------------------------------------------------ xlsx (no dependencies) */
+/* xlsx-core: store-only ZIP + SpreadsheetML. Hand-rolled so the console keeps
+   needing no build step and no third-party script (the page stays CSP-clean). */
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+  const encoder = new TextEncoder();
   const now = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-`
-    + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  download(`tickhub-${route}-${stamp}.csv`, "\ufeff" + lines.join("\r\n"));
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const name = encoder.encode(file.name);
+    const data = file.data;
+    const crc = crc32(data);
+
+    const local = new Uint8Array(30 + name.length);
+    const localView = new DataView(local.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, dosTime, true);
+    localView.setUint16(12, dosDate, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, data.length, true);
+    localView.setUint32(22, data.length, true);
+    localView.setUint16(26, name.length, true);
+    localView.setUint16(28, 0, true);
+    local.set(name, 30);
+
+    const entry = new Uint8Array(46 + name.length);
+    const entryView = new DataView(entry.buffer);
+    entryView.setUint32(0, 0x02014b50, true);
+    entryView.setUint16(4, 20, true);
+    entryView.setUint16(6, 20, true);
+    entryView.setUint16(8, 0x0800, true);
+    entryView.setUint16(10, 0, true);
+    entryView.setUint16(12, dosTime, true);
+    entryView.setUint16(14, dosDate, true);
+    entryView.setUint32(16, crc, true);
+    entryView.setUint32(20, data.length, true);
+    entryView.setUint32(24, data.length, true);
+    entryView.setUint16(28, name.length, true);
+    entryView.setUint16(30, 0, true);
+    entryView.setUint16(32, 0, true);
+    entryView.setUint16(34, 0, true);
+    entryView.setUint16(36, 0, true);
+    entryView.setUint32(38, 0, true);
+    entryView.setUint32(42, offset, true);
+    entry.set(name, 46);
+
+    parts.push(local, data);
+    central.push(entry);
+    offset += local.length + data.length;
+  }
+
+  const centralSize = central.reduce((sum, entry) => sum + entry.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+
+  const out = new Uint8Array(offset + centralSize + end.length);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; }
+  for (const entry of central) { out.set(entry, at); at += entry.length; }
+  out.set(end, at);
+  return out;
+}
+
+function xmlText(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[c]));
+}
+
+function colName(index) {
+  let name = "";
+  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) {
+    name = String.fromCharCode(65 + ((n - 1) % 26)) + name;
+  }
+  return name;
+}
+
+// Excel only sums and right-aligns real numbers. Identifiers such as 000001
+// must stay text, so only canonical decimals are converted back.
+function spreadsheetCell(text) {
+  const value = String(text == null ? "" : text).trim();
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return text;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : text;
+}
+
+function sheetXml(rows) {
+  const body = rows.map((cells, r) => {
+    const xml = cells.map((value, c) => {
+      const ref = colName(c) + (r + 1);
+      if (typeof value === "number" && Number.isFinite(value)) return `<c r="${ref}"><v>${value}</v></c>`;
+      const text = xmlText(value);
+      return text === "" ? `<c r="${ref}"/>`
+        : `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`;
+    }).join("");
+    return `<row r="${r + 1}">${xml}</row>`;
+  }).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body}</sheetData></worksheet>`;
+}
+
+function xlsxBytes(sheets) {
+  const encoder = new TextEncoder();
+  const relNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const names = sheets.map((sheet, i) =>
+    (String(sheet.name || "").replace(/[\[\]:*?\/\\]/g, "-").slice(0, 31) || `Sheet${i + 1}`));
+  const overrides = sheets.map((_, i) =>
+    `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+  const sheetTags = names.map((name, i) =>
+    `<sheet name="${xmlText(name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("");
+  const sheetRels = sheets.map((_, i) =>
+    `<Relationship Id="rId${i + 1}" Type="${relNs}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("");
+  const files = [
+    { name: "[Content_Types].xml", text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${overrides}</Types>` },
+    { name: "_rels/.rels", text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relNs}/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: "xl/workbook.xml", text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${relNs}"><sheets>${sheetTags}</sheets></workbook>` },
+    { name: "xl/_rels/workbook.xml.rels", text: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}</Relationships>` },
+    ...sheets.map((sheet, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, text: sheetXml(sheet.rows) })),
+  ].map((file) => ({ name: file.name, data: encoder.encode(file.text) }));
+  return zipStore(files);
+}
+/* xlsx-core-end */
+
+function exportViewXlsx() {
+  const route = currentRoute();
+  const tables = [...$("#view").querySelectorAll("table")];
+  if (!tables.length) { toast("当前页没有可导出的表格", true); return; }
+  const sheets = tables.map((table, index) => {
+    const rows = [];
+    const header = table.querySelector("thead tr");
+    if (header) rows.push([...header.children].map((th) => headerText(th)));
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      if (row.hidden) return;
+      rows.push([...row.children].map((td) => spreadsheetCell(td.textContent)));
+    });
+    return { name: `表${index + 1}`, rows };
+  });
+  download(`tickhub-${route}-${exportStamp()}.xlsx`, xlsxBytes(sheets),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 }
 
 /* --------------------------------------------------------------- theme */
@@ -433,7 +759,10 @@ function renderHelp() {
   const shortcuts = [
     ["Ctrl / ⌘ + K", "聚焦搜索框"],
     ["/", "聚焦搜索框"],
+    ["Enter（搜索框）", "跨页搜索其余页面"],
     ["Ctrl / ⌘ + E", "导出当前页（CSV，遵循当前搜索）"],
+    ["Ctrl / ⌘ + Shift + E", "导出当前页为 Excel（.xlsx）"],
+    ["点击表头", "按该列排序（服务端定序的表不参与）"],
     ["Ctrl / ⌘ + J", "切换主题：自动 / 浅色 / 深色"],
     ["Alt + 1…9", "跳转到第 N 个页面"],
     ["?", "打开本帮助"],
@@ -731,7 +1060,9 @@ views.logs = async () => {
       <label>条数<input id="log-limit" type="number" min="1" max="500" value="200" style="width:90px;" /></label>
       <button type="button" class="primary" data-action="logs-query">查询</button>
     </div>
-    <div id="log-rows">${table(data.rows)}</div>`;
+    <div id="log-rows">${table(data.rows, null, {
+      sort: false, note: "顺序由服务端决定：最新在前；要换顺序请调整上方条件后重新查询。",
+    })}</div>`;
 };
 
 views.config = async () => {
@@ -747,7 +1078,7 @@ views.audit = async () => {
   return `
     <h2>审计</h2>
     <p class="sub">所有写操作与鉴权事件都会落盘（<code>logs/admin_audit.jsonl</code>），最新在前。</p>
-    ${table(data.rows)}`;
+    ${table(data.rows, null, { sort: false, note: "顺序由服务端决定：最新在前。" })}`;
 };
 
 /* ------------------------------------------------------------- actions */
@@ -757,6 +1088,7 @@ async function handleAction(action, button) {
   const show = (value) => { if (result) result.innerHTML = `<h3>结果</h3>${typeof value === "string" ? value : pre(value)}`; };
 
   if (action === "refresh-view") return renderRoute(true);
+  if (action === "search-close") return hideCrossResults();
 
   if (action === "sources-check") {
     if (!guardReadonly()) return;
@@ -852,7 +1184,9 @@ async function handleAction(action, button) {
     const code = $("#data-code").value.trim();
     return runAction(button, async () => {
       const data = await api(`/api/risk?${new URLSearchParams({ code, limit: "100" })}`);
-      show(table(data.events || []));
+      show(table(data.events || [], null, {
+        sort: false, note: "顺序由服务端决定：事件日期最新在前。",
+      }));
     });
   }
 
@@ -878,16 +1212,37 @@ async function handleAction(action, button) {
     });
     return runAction(button, async () => {
       const data = await api(`/api/logs?${query}`);
-      $("#log-rows").innerHTML = table(data.rows);
+      $("#log-rows").innerHTML = table(data.rows, null, {
+        sort: false, note: "顺序由服务端决定：最新在前；要换顺序请调整上方条件后重新查询。",
+      });
     });
   }
 }
 
 document.addEventListener("click", (event) => {
+  const header = event.target.closest("th[data-sortable]");
+  if (header) {
+    sortTable(header.closest("table"), Number(header.dataset.col), header);
+    return;
+  }
+  const jump = event.target.closest("[data-cross-route]");
+  if (jump) {
+    state.keepSearch = true;  // keep the query so the target route opens filtered too
+    hideCrossResults();
+    return;
+  }
   const button = event.target.closest("[data-action]");
   if (!button) return;
   event.preventDefault();
   handleAction(button.dataset.action, button).catch((exc) => toast(exc.message || String(exc), true));
+});
+
+// Sortable headers are focusable; Enter / Space must work without a mouse.
+$("#view").addEventListener("keydown", (event) => {
+  const header = event.target.closest("th[data-sortable]");
+  if (!header || (event.key !== "Enter" && event.key !== " ")) return;
+  event.preventDefault();
+  sortTable(header.closest("table"), Number(header.dataset.col), header);
 });
 
 /* --------------------------------------------------------------- routing */
@@ -929,7 +1284,8 @@ function fmtDuration(seconds) {
 
 window.addEventListener("hashchange", () => {
   const search = $("#search");
-  if (search.value) { search.value = ""; applySearch(); }
+  if (search.value && !state.keepSearch) { search.value = ""; applySearch(); }
+  state.keepSearch = false;
   renderRoute();
 });
 $("#connect").addEventListener("click", () => connect().then((ok) => { if (ok) renderRoute(true); }));
@@ -940,7 +1296,11 @@ $("#token").addEventListener("keydown", (event) => {
 /* ------------------------------------------- search / export / theme / help */
 
 $("#search").addEventListener("input", applySearch);
+$("#search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); scanRoutes(); }
+});
 $("#export").addEventListener("click", exportView);
+$("#export-xlsx").addEventListener("click", exportViewXlsx);
 $("#theme").addEventListener("click", cycleTheme);
 $("#shortcut-button").addEventListener("click", openHelp);
 $("#shortcuts").addEventListener("close", () => $("#shortcut-button").focus());
@@ -956,12 +1316,17 @@ document.addEventListener("keydown", (event) => {
   const mod = event.ctrlKey || event.metaKey;
   const key = event.key.toLowerCase();
   if (mod && key === "k") { event.preventDefault(); $("#search").focus(); $("#search").select(); return; }
-  if (mod && key === "e") { event.preventDefault(); exportView(); return; }
+  if (mod && key === "e") {
+    event.preventDefault();
+    if (event.shiftKey) exportViewXlsx(); else exportView();
+    return;
+  }
   if (mod && key === "j") { event.preventDefault(); cycleTheme(); return; }
   if (event.key === "Escape") {
     if ($("#shortcuts").open) return;
     const search = $("#search");
     if (search.value) { search.value = ""; applySearch(); }
+    hideCrossResults();
     if (document.activeElement === search) search.blur();
     $("#toast").style.display = "none";
     return;

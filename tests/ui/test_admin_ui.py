@@ -156,6 +156,160 @@ process.stdout.write(JSON.stringify(rows));
     assert json.loads(result.stdout) == ['"a,b"', '"say ""hi"""', '"x\ny"', "3", ""]
 
 
+def test_page_sorts_client_tables_and_leaves_server_order_alone() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert "function sortTable(" in html
+    assert "function compareCells(" in html
+    assert "data-sortable" in html
+    assert 'aria-sort="none"' in html
+    # Sortable headers work from the keyboard too.
+    assert 'event.key !== "Enter" && event.key !== " "' in html
+    # Opting out is explicit: the ordering owner is the server for feeds it sorts.
+    assert "opts.sort !== false" in html
+    assert html.count("sort: false") >= 4
+    assert html.count("顺序由服务端决定") >= 4
+
+
+def test_sort_helpers_order_numbers_text_and_blanks(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+
+    script = _script(ADMIN_PAGE.read_text(encoding="utf-8"))
+    match = re.search(r"/\* sort-core \*/.*?/\* sort-core-end \*/", script, flags=re.S)
+    assert match
+    probe = match.group(0) + r'''
+const sorted = ["10", "9", "apple", "Apple", "第10组", "第2组"].sort(compareCells);
+const out = {
+  numbers: compareCells("9", "10") < 0,
+  text: compareCells("alpha", "beta") < 0,
+  zhNumeric: sorted.indexOf("第2组") < sorted.indexOf("第10组"),
+  caseInsensitive: compareCells("apple", "Apple") === 0,
+  blankDash: isBlank("—"),
+  blankEmpty: isBlank(""),
+  zeroIsReal: !isBlank("0"),
+  collapsed: cellText({ textContent: "  a \n b  " }),
+};
+process.stdout.write(JSON.stringify(out));
+'''
+    source = tmp_path / "sort_core.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "numbers": True,
+        "text": True,
+        "zhNumeric": True,
+        "caseInsensitive": True,
+        "blankDash": True,
+        "blankEmpty": True,
+        "zeroIsReal": True,
+        "collapsed": "a b",
+    }
+
+
+def test_page_searches_across_routes_without_touching_the_server() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert 'id="search-results"' in html
+    assert "function scanRoutes(" in html
+    assert "state.keepSearch = true" in html
+    assert 'data-cross-route' in html
+    # Enter in the search box scans the routes the page has not rendered.
+    assert 'if (event.key === "Enter") { event.preventDefault(); scanRoutes(); }' in html
+    # The scan renders off-screen; it must not write to the page or the server.
+    body = re.search(r"async function scanRoutes\(\).*?\n}\n", html, flags=re.S)
+    assert body
+    assert "fetch(" not in body.group(0)
+    assert "post(" not in body.group(0)
+    assert 'if (route === currentRoute()) continue;' in body.group(0)
+
+
+def test_page_exports_the_current_view_as_xlsx_without_dependencies() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert "function exportViewXlsx(" in html
+    for name in ("crc32", "zipStore", "sheetXml", "xlsxBytes", "colName", "xmlText", "headerText", "spreadsheetCell"):
+        assert f"function {name}(" in html, name
+    assert "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" in html
+    assert "[Content_Types].xml" in html
+    # store-only ZIP: local header, central directory, end of central directory
+    for signature in ("0x04034b50", "0x02014b50", "0x06054b50"):
+        assert signature in html, signature
+    # The exporter honours the active search and drops the sort arrow from headers.
+    assert "if (row.hidden) return;" in html
+    assert "headerText(th)" in html
+
+
+def test_generated_xlsx_is_a_valid_zip_workbook(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+    import zipfile
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+
+    script = _script(ADMIN_PAGE.read_text(encoding="utf-8"))
+    match = re.search(r"/\* xlsx-core.*?\*/\n.*?/\* xlsx-core-end \*/", script, flags=re.S)
+    assert match
+    book = tmp_path / "book.xlsx"
+    probe = match.group(0) + f'''
+const fs = require("fs");
+const bytes = xlsxBytes([{{ name: "结果", rows: [["编号", "名称"], [42, "报价 <ok> & \\"x\\""]] }}]);
+fs.writeFileSync({json.dumps(str(book))}, Buffer.from(bytes));
+'''
+    source = tmp_path / "xlsx_core.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+
+    with zipfile.ZipFile(book) as zf:
+        assert zf.testzip() is None  # CRC-32 of every member matches
+        assert {
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/worksheets/sheet1.xml",
+        } <= set(zf.namelist())
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        workbook = zf.read("xl/workbook.xml").decode("utf-8")
+    assert "<c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">编号</t></is></c>" in sheet
+    assert "<c r=\"A2\"><v>42</v></c>" in sheet
+    assert "报价 &lt;ok&gt; &amp; &quot;x&quot;" in sheet
+    assert 'name="结果"' in workbook
+
+
+def test_xlsx_cells_stay_numeric_but_identifier_codes_stay_text(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+
+    script = _script(ADMIN_PAGE.read_text(encoding="utf-8"))
+    match = re.search(r"function spreadsheetCell\(.*?\n\}\n", script, flags=re.S)
+    assert match
+    probe = match.group(0) + r'''
+const out = ["107", "10.5", "-3", "000001", "007", "600000", "1e6", "—", "", "true", " 42 "]
+  .map((value) => spreadsheetCell(value));
+process.stdout.write(JSON.stringify(out));
+'''
+    source = tmp_path / "spreadsheet_cell.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=60, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        107, 10.5, -3, "000001", "007", 600000, "1e6", "—", "", "true", 42,
+    ]
+
+
 def test_page_offers_a_manual_three_state_theme() -> None:
     html = ADMIN_PAGE.read_text(encoding="utf-8")
     assert 'id="theme"' in html

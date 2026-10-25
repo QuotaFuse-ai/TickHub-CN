@@ -48,6 +48,14 @@ SOURCE_LIMITS: dict[str, tuple[float, int, int]] = {
 }
 
 
+class RateLimitPaced(RuntimeError):
+    """The limiter would have to sleep longer than the caller allowed."""
+
+    def __init__(self, retry_after: float) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"paced for {retry_after:.1f}s")
+
+
 class RateLimiter:
     """Sliding-window limiter with a minimum gap between calls."""
 
@@ -59,19 +67,28 @@ class RateLimiter:
         self._calls: deque[float] = deque()
         self._lock = threading.Lock()
 
-    def acquire(self) -> None:
+    def acquire(self, max_wait: float | None = None) -> None:
+        """Wait for a slot; with ``max_wait`` raise ``RateLimitPaced`` instead.
+
+        A paced endpoint group is not worth stalling a tool call for: the caller
+        can serve a fallback or a stale copy now and say when to retry.
+        """
         with self._lock:
             now = time.monotonic()
-            wait = self.min_interval - (now - self._last)
+            wait = max(self.min_interval - (now - self._last), 0.0)
+            while self._calls and now - self._calls[0] > self.window:
+                self._calls.popleft()
+            window_wait = 0.0
+            if len(self._calls) >= self.max_calls:
+                window_wait = max(self.window - (now - self._calls[0]) + 0.05, 0.0)
+            need = max(wait, window_wait)
+            if max_wait is not None and need > max_wait:
+                raise RateLimitPaced(need)
             if wait > 0:
                 time.sleep(wait + random.uniform(0.01, 0.08))
                 now = time.monotonic()
-            while self._calls and now - self._calls[0] > self.window:
-                self._calls.popleft()
-            if len(self._calls) >= self.max_calls:
-                sleep_for = self.window - (now - self._calls[0]) + 0.05
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
+            if window_wait > 0:
+                time.sleep(window_wait)
                 now = time.monotonic()
                 while self._calls and now - self._calls[0] > self.window:
                     self._calls.popleft()
@@ -102,6 +119,8 @@ ENDPOINT_MIN_INTERVAL = 25.0
 ENDPOINT_MAX_CALLS = 3
 ENDPOINT_WINDOW = 60
 ENDPOINT_BREAKER_SECONDS = 600.0
+# Longest a tool call may block on the endpoint gate before degrading instead.
+ENDPOINT_MAX_WAIT = 2.0
 
 
 def endpoint_family(url: str) -> str | None:
@@ -407,10 +426,28 @@ def fetch(
             raise TickHubError(
                 "QFSD-7001",
                 f"{family} 连接被重置，熔断中（约 {int(cooldown)} 秒后恢复）",
-                detail={"url": url, "endpoint": family, "retry_after_s": int(cooldown) + 1},
+                detail={
+                    "url": url,
+                    "endpoint": family,
+                    "reason": "endpoint_breaker",
+                    "retry_after_s": int(cooldown) + 1,
+                },
                 retryable=True,
             )
-        endpoint_limiter(family).acquire()
+        try:
+            endpoint_limiter(family).acquire(max_wait=ENDPOINT_MAX_WAIT)
+        except RateLimitPaced as paced:
+            raise TickHubError(
+                "QFSD-7001",
+                f"{family} 调用过于频繁（约 {int(paced.retry_after) + 1} 秒后可再试）",
+                detail={
+                    "url": url,
+                    "endpoint": family,
+                    "reason": "endpoint_paced",
+                    "retry_after_s": int(paced.retry_after) + 1,
+                },
+                retryable=True,
+            ) from paced
     limiter_for(source).acquire()
     last_err: Exception | None = None
     tried: set[str] = set()

@@ -98,12 +98,17 @@ _SZSE_HTTP_NOTE = (
 )
 _SZSE_PLAIN_HTTP: ContextVar[bool] = ContextVar("tickhub_szse_plain_http", default=False)
 
+# One ShowReport page is ~445 KB; a measured page took 46 s on a residential
+# line, so the global 15 s timeout turns a slow page into a failed table.
+_SZSE_TIMEOUT = 60.0
+
 
 def _reset_szse_transport() -> None:
     _SZSE_PLAIN_HTTP.set(False)
 
 
 def _szse_request(method: str, url: str, **kwargs: Any) -> Any:
+    kwargs.setdefault("timeout", _SZSE_TIMEOUT)
     try:
         return request("exchange", method, url, **kwargs)
     except TickHubError as exc:

@@ -69,6 +69,22 @@ def test_downgrade_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [backups._SZSE_REPORT]
 
 
+def test_report_pages_get_a_timeout_that_fits_their_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+
+    def fake_request(_source: str, _method: str, _url: str, **kwargs: object) -> object:
+        seen.append(kwargs.get("timeout"))
+        return {"ok": True}
+
+    monkeypatch.setattr(backups, "request", fake_request)
+
+    backups._szse_request("GET", backups._SZSE_REPORT)
+    backups._szse_request("GET", backups._SZSE_REPORT, timeout=5)
+
+    assert seen == [backups._SZSE_TIMEOUT, 5]
+    assert backups._SZSE_TIMEOUT > 15.0
+
+
 def test_downgrade_retries_once_over_plain_http(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
