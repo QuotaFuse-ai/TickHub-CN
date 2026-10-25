@@ -1,3 +1,37 @@
+<h1 align="center">TickHub-CN</h1>
+
+<p align="center">
+  <b>A 股全栈数据 · 14 层工具 · 124 个 MCP 工具 + 25 个兼容别名</b>
+</p>
+
+<p align="center">
+  行情 K 线 · 财报 · 资金面 · 公告 · 研报 · 宏观 · 指数 · 期货 · 期权 · 可转债
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
+  <a href="https://github.com/QuotaFuse-ai/TickHub-CN/stargazers"><img src="https://img.shields.io/github/stars/QuotaFuse-ai/TickHub-CN?style=social" alt="Stars"></a>
+  <br>
+  <img src="https://img.shields.io/badge/layers-14-2ea44f.svg" alt="Layers">
+  <img src="https://img.shields.io/badge/MCP%20tools-149-2ea44f.svg" alt="Tools">
+  <img src="https://img.shields.io/badge/auth-zero-success.svg" alt="Zero Auth">
+</p>
+
+---
+
+<p align="center">
+  <a href="#features">特性</a> ·
+  <a href="#architecture">架构</a> ·
+  <a href="#quickstart">快速开始</a> ·
+  <a href="#clients">接入方式</a> ·
+  <a href="#skill">Skill</a> ·
+  <a href="#layers">数据覆盖</a> ·
+  <a href="#examples">使用示例</a> ·
+  <a href="#faq">FAQ</a> ·
+  <a href="https://github.com/QuotaFuse-ai/TickHub-CN/releases">版本发布</a>
+</p>
+
 TickHub-CN 只做一件事：**把 A 股数据变成模型可以直接调用的结构化工具**。
 产品围绕一条规则构建 —— **模型报告的每一个数字都必须来自一次工具调用**。
 行情、财报、资金、公告、研报、宏观、指数、期货、期权、可转债，全部由服务端抓取、
@@ -1103,6 +1137,7 @@ pytest -m live
 - [docs/PIP_DISTRIBUTION.md](docs/PIP_DISTRIBUTION.md) —— 打包与发布
 - [docs/MULTI_MODEL_INTEGRATION.md](docs/MULTI_MODEL_INTEGRATION.md) —— 多模型接线与客户端矩阵
 - [skills/tickhub-cn/SKILL.md](skills/tickhub-cn/SKILL.md) —— Agent 技能包
+- [docs/decisions/](docs/decisions/) —— 架构决策记录（ADR）
 
 ---
 
