@@ -81,6 +81,9 @@ class Settings:
     # offline crawler
     offline_crawler_enable: bool = False
     offline_crawler_cron: str = "0 2 * * *"
+    # northbound flow is only published around the session; a 02:00 tick always
+    # sees the closed endpoint, so this snapshot needs its own post-close slot
+    offline_crawler_northbound_cron: str = "5 15 * * 1-5"
     offline_crawler_concurrency: int = 2
     offline_crawler_watchlist: str = ""
     offline_crawler_max_codes: int = 50
@@ -91,7 +94,7 @@ class Settings:
     # proxy pool
     proxy_pool_enable: bool = False
     proxy_pool_list: str = ""
-    proxy_pool_config_path: str = "./proxy_pool.json"
+    proxy_pool_config_path: str = "logs/proxy_pool.json"
     proxy_pool_check_timeout: int = 10
     proxy_pool_check_interval: int = 60
 
@@ -160,6 +163,7 @@ class Settings:
             ),
             offline_crawler_enable=_bool(g("OFFLINE_CRAWLER_ENABLE"), False),
             offline_crawler_cron=g("OFFLINE_CRAWLER_CRON", "0 2 * * *"),
+            offline_crawler_northbound_cron=g("OFFLINE_CRAWLER_NORTHBOUND_CRON", "5 15 * * 1-5"),
             offline_crawler_concurrency=_int(g("OFFLINE_CRAWLER_CONCURRENCY"), 2),
             offline_crawler_watchlist=g("OFFLINE_CRAWLER_WATCHLIST"),
             offline_crawler_max_codes=_int(g("OFFLINE_CRAWLER_MAX_CODES"), 50),
@@ -168,7 +172,7 @@ class Settings:
             archive_db_path=g("ARCHIVE_DB_PATH", "./var/archive/tickhub.db"),
             proxy_pool_enable=_bool(g("PROXY_POOL_ENABLE"), False),
             proxy_pool_list=g("PROXY_POOL_LIST"),
-            proxy_pool_config_path=g("PROXY_POOL_CONFIG_PATH", "./proxy_pool.json"),
+            proxy_pool_config_path=g("PROXY_POOL_CONFIG_PATH", "logs/proxy_pool.json"),
             proxy_pool_check_timeout=_int(g("PROXY_POOL_CHECK_TIMEOUT"), 10),
             proxy_pool_check_interval=_int(g("PROXY_POOL_CHECK_INTERVAL"), 60),
             log_db_host=g("LOG_DB_HOST", "127.0.0.1"),

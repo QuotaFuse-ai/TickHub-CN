@@ -129,6 +129,20 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
         )
         return 3
 
+    wants_northbound = task in ("all", "northbound")
+    northbound_trigger = None
+    if wants_northbound:
+        try:
+            northbound_trigger = CronTrigger.from_crontab(
+                settings.offline_crawler_northbound_cron, timezone="Asia/Shanghai"
+            )
+        except Exception as exc:
+            _log().error(
+                "invalid OFFLINE_CRAWLER_NORTHBOUND_CRON",
+                extra={"event": "crawler_cron_invalid", "error_code": "QFSD-3001", "error": str(exc)[:200]},
+            )
+            return 3
+
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
         _tick,
@@ -141,6 +155,20 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
         misfire_grace_time=3600,
         replace_existing=True,
     )
+    if northbound_trigger is not None:
+        # The session-time snapshot cannot ride the nightly job: kamt is closed
+        # (status 3, values zeroed or quota placeholders) long before 02:00.
+        scheduler.add_job(
+            _tick,
+            northbound_trigger,
+            args=["northbound"],
+            id="offline_crawl_northbound",
+            name="offline crawl (northbound)",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+            replace_existing=True,
+        )
     should_run = settings.offline_crawler_run_on_start if run_now is None else bool(run_now)
     if should_run:
         scheduler.add_job(
@@ -154,18 +182,24 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
 
     _install_signals(scheduler)
     _scheduler = scheduler
-    next_run = None
-    try:
-        nxt = trigger.get_next_fire_time(None, _dt.datetime.now(trigger.timezone))
-        next_run = nxt.isoformat(timespec="seconds") if nxt else None
-    except Exception:
-        pass
+    def _next_fire(trig: Any) -> str | None:
+        try:
+            nxt = trig.get_next_fire_time(None, _dt.datetime.now(trig.timezone))
+            return nxt.isoformat(timespec="seconds") if nxt else None
+        except Exception:
+            return None
+
+    next_run = _next_fire(trigger)
+    northbound_next = _next_fire(northbound_trigger) if northbound_trigger is not None else None
+    northbound_cron = settings.offline_crawler_northbound_cron if wants_northbound else ""
     write_state(
         pid=os.getpid(),
         cron=settings.offline_crawler_cron,
+        northbound_cron=northbound_cron,
         task=task,
         started_at=_dt.datetime.now().isoformat(timespec="seconds"),
         next_run_at=next_run,
+        northbound_next_run_at=northbound_next,
     )
     _log().info(
         "crawler daemon started",
@@ -173,10 +207,12 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
             "event": "crawler_start",
             "detail": {
                 "cron": settings.offline_crawler_cron,
+                "northbound_cron": northbound_cron,
                 "task": task,
                 "run_on_start": should_run,
                 "timezone": "Asia/Shanghai",
                 "next_run_at": next_run,
+                "northbound_next_run_at": northbound_next,
             },
         },
     )
@@ -207,6 +243,8 @@ def daemon_status() -> dict[str, Any]:
         "started_at": state.get("started_at"),
         "last_run_at": state.get("last_run_at"),
         "next_run_at": state.get("next_run_at"),
+        "northbound_cron": state.get("northbound_cron", ""),
+        "northbound_next_run_at": state.get("northbound_next_run_at"),
         "last_error": state.get("last_error", ""),
         "updated_at": state.get("updated_at"),
     }

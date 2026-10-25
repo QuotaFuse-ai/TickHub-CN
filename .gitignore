@@ -21,6 +21,8 @@ htmlcov/
 logs/
 var/
 *.sqlite3
+# legacy location of the proxy pool (credentials); now logs/proxy_pool.json
+proxy_pool.json
 
 # Reference checkout (external repo, kept local for comparison only)
 .reference-a-stock-data/

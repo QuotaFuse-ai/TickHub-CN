@@ -244,3 +244,14 @@ def test_invalid_proxy_url_is_rejected(tmp_path):
     for bad in ("", "   ", "ftp://10.0.0.1:21", "http://10.0.0.1:not-a-port"):
         with pytest.raises(ValueError):
             add_proxy_node({"url": bad}, settings)
+
+
+def test_pool_file_defaults_under_ignored_logs_dir():
+    """Credential-bearing pool file must not default to a tracked repo path."""
+    from dataclasses import fields
+    from pathlib import Path
+
+    from tickhub_cn.core.config import Settings
+
+    default = next(f.default for f in fields(Settings) if f.name == "proxy_pool_config_path")
+    assert Path(default).parts[0] == "logs"

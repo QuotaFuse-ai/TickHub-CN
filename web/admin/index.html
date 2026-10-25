@@ -960,6 +960,7 @@ views.dashboard = async () => {
         ${kv([
           ["启用", crawler.enabled],
           ["Cron", crawler.cron],
+          ["北向 Cron", crawler.northbound_cron],
           ["并发", crawler.concurrency],
           ["关注范围", crawler.watchlist],
           ["上次任务", crawler.last_task],

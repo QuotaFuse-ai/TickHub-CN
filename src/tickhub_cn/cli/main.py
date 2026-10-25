@@ -886,10 +886,12 @@ def _config_check_payload() -> dict[str, Any]:
     fm = FieldMap.load(settings.field_map_path)
     add("field_map", "error" if fm.error else "ok", fm.error or f"{len(fm.tools)} tools mapped")
 
-    if settings.proxy_pool_config_path and not Path(settings.proxy_pool_config_path).exists():
+    if not settings.proxy_pool_enable:
+        add("proxy_pool", "ok", "disabled (PROXY_POOL_ENABLE=false)")
+    elif not Path(settings.proxy_pool_config_path).exists():
         add("proxy_pool", "warn", f"missing file: {settings.proxy_pool_config_path}")
     else:
-        add("proxy_pool", "ok", settings.proxy_pool_config_path or "inline list / disabled")
+        add("proxy_pool", "ok", settings.proxy_pool_config_path)
 
     if settings.admin_host not in ("127.0.0.1", "::1", "localhost") and not settings.admin_auth_token:
         add("admin", "error", "non-loopback admin host requires ADMIN_AUTH_TOKEN")

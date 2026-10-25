@@ -509,6 +509,7 @@ def crawl_status() -> dict[str, Any]:
     return {
         "enabled": settings.offline_crawler_enable,
         "cron": settings.offline_crawler_cron,
+        "northbound_cron": settings.offline_crawler_northbound_cron,
         "concurrency": settings.offline_crawler_concurrency,
         "watchlist": len(configured) or f"index:{DEFAULT_INDEX}",
         "max_codes": settings.offline_crawler_max_codes,

@@ -129,9 +129,11 @@ th-cn crawler run --task announcements --codes 600000 --days 30
 th-cn crawler daemon
 ```
 
-Tasks: `announcements`, `reports`, `risks`, `all`. `daemon` blocks and runs on
-the cron schedule (`OFFLINE_CRAWLER_CRON`, default `0 2 * * *`) with no port.
-`crawler run` with partial failures exits 8.
+Tasks: `announcements`, `reports`, `risks`, `northbound`, `all`. `daemon` blocks and runs on
+the cron schedule (`OFFLINE_CRAWLER_CRON`, default `0 2 * * *`) with no port. When
+the task set includes `northbound`, a second job snapshots it on
+`OFFLINE_CRAWLER_NORTHBOUND_CRON` (default `5 15 * * 1-5`), because the northbound
+endpoint publishes nothing by the 02:00 tick. `crawler run` with partial failures exits 8.
 
 ## Transports and services
 

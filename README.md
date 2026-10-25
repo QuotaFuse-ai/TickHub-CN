@@ -167,7 +167,7 @@ masked by default. The files below are optional and ship with safe defaults:
 | --- | --- |
 | `.env` | runtime settings (copy `.env.example`) |
 | `field_map.toml` | external field aliases, hidden fields, default projections |
-| `proxy_pool.json` | authenticated proxy nodes (requires `PROXY_POOL_ENABLE=true`) |
+| `logs/proxy_pool.json` | authenticated proxy nodes (requires `PROXY_POOL_ENABLE=true`); git-ignored |
 | `model_gateway.toml` | optional multi-model gateway (off; never used for numbers) |
 | `config/admin.toml` | Admin Console settings |
 
