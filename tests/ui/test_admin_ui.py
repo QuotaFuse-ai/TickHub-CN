@@ -58,7 +58,7 @@ def _client(**overrides: Any) -> Any:
 def test_admin_console_is_served_at_root() -> None:
     reply = _client().get("/")
     assert reply.status_code == 200
-    assert "TickHub-CN 管理控制台" in reply.text
+    assert "TickHub-CN（A股数据枢纽）管理控制台" in reply.text
     assert "数据网关" not in reply.text  # never the unauthenticated gateway page
 
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>TickHub-CN 管理控制台</title>
+<title>TickHub-CN（A股数据枢纽）管理控制台</title>
 <style>
   :root {
     color-scheme: light;
@@ -134,7 +134,7 @@
 </head>
 <body>
 <header>
-  <h1>TickHub-CN 管理控制台</h1>
+  <h1>TickHub-CN（A股数据枢纽）管理控制台</h1>
   <span id="version" class="badge">未连接</span>
   <span id="ro" class="badge" hidden></span>
   <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
@@ -636,7 +636,7 @@ function exportView() {
   const route = currentRoute();
   const view = $("#view");
   const tables = [...view.querySelectorAll("table")];
-  const lines = [`# TickHub-CN 管理控制台 / ${route} / ${new Date().toISOString()}`];
+  const lines = [`# TickHub-CN（A股数据枢纽）管理控制台 / ${route} / ${new Date().toISOString()}`];
 
   tables.forEach((table, index) => {
     lines.push(`# 表 ${index + 1}`);
