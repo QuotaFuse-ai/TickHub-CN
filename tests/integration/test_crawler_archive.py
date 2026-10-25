@@ -27,6 +27,13 @@ REPORTS = {
     "000001": [{"code": "000001", "title": "三季报点评", "publish_date": "2026-10-22", "org": "示例证券", "id": "R2"}],
 }
 
+NORTHBOUND = [
+    {"channel": "hk2sh", "name": "沪股通", "net_inflow": 123456789.0, "net_inflow_wan": 123456.0, "status": 1},
+    {"channel": "hk2sz", "name": "深股通", "net_inflow": -9876543.0, "net_inflow_wan": -9876.0, "status": 1},
+    {"channel": "sh2hk", "name": "港股通(沪)", "net_inflow": 5550000.0, "net_inflow_wan": 555.0, "status": 1},
+    {"channel": "sz2hk", "name": "港股通(深)", "net_inflow": 0.0, "net_inflow_wan": 0.0, "status": 1},
+]
+
 
 def _fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
     params = params or {}
@@ -39,6 +46,8 @@ def _fake_call(name: str, params: dict[str, Any] | None = None) -> Any:
         return {"ok": True, "data": {"announcements": ANNOUNCEMENTS.get(code, [])}}
     if name == "eastmoney_reports":
         return {"ok": True, "data": {"reports": REPORTS.get(code, [])}}
+    if name == "northbound_flow":
+        return {"ok": True, "data": {"channels": NORTHBOUND}, "meta": {"count": len(NORTHBOUND)}}
     raise AssertionError(f"unexpected tool call: {name}")
 
 
@@ -52,14 +61,17 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     assert first["status"] == "ok"
     assert first["codes"] == 2
     assert first["task_id"] > 0
-    assert [t["task"] for t in first["tasks"]] == ["announcements", "reports", "risks"]
+    assert [t["task"] for t in first["tasks"]] == ["announcements", "reports", "risks", "northbound"]
     by_task = {t["task"]: t for t in first["tasks"]}
     assert by_task["announcements"]["fetched"] == 3
     assert by_task["announcements"]["failed"] == []
     assert by_task["reports"]["fetched"] == 2
     # The risk pass reads the archive, so it sees all three stored announcements.
     assert by_task["risks"]["fetched"] == 3
-    assert first["fetched"] == 8
+    # Northbound is not per-code: one snapshot covers all four channels.
+    assert by_task["northbound"]["fetched"] == 4
+    assert by_task["northbound"]["inserted"] == 4
+    assert first["fetched"] == 12
     assert first["inserted"] >= 5
 
     stats = archive.stats()
@@ -67,6 +79,7 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     assert stats["research_report"] == 2
     # "回购" and "减持" both classify into risk events; the third title does not.
     assert stats["risk_event"] == 2
+    assert stats["northbound_flow"] == 4
 
     rows = archive.announcements(code="600000", limit=10)
     assert {r["title"] for r in rows} == {"关于回购公司股份的公告", "2026年第三季度报告"}
@@ -78,13 +91,20 @@ def test_crawl_all_is_idempotent_and_archive_first(monkeypatch: pytest.MonkeyPat
     assert second["inserted"] == 0
     assert second["fetched"] == first["fetched"]
     for task in second["tasks"]:
-        if task["task"] != "risks":
-            assert task["skipped"] == task["fetched"]
+        if task["task"] in ("risks", "northbound"):
+            continue
+        assert task["skipped"] == task["fetched"]
+    # Northbound dedupes by (trade_date, channel) through an upsert, so the
+    # second run refreshes the snapshot without growing the table.
+    second_nb = {t["task"]: t for t in second["tasks"]}["northbound"]
+    assert second_nb["fetched"] == 4
+    assert second_nb["inserted"] == 0
 
     again = archive.stats()
     assert again["announcement"] == stats["announcement"]
     assert again["research_report"] == stats["research_report"]
     assert again["risk_event"] == stats["risk_event"]
+    assert again["northbound_flow"] == 4
     assert again["crawl_task"] == stats["crawl_task"] + 1
 
     last = archive.last_task()

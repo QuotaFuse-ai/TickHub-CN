@@ -73,14 +73,14 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | Tool | Parameters | TTL (s) | Description |
 | --- | --- | --- | --- |
 | `block_trades` | `code`, `date`, `page_size` | 86400 | Block-trade (大宗交易) records by stock or trading date. |
-| `board_fund_flow` | `board_type`, `page`, `page_size` | 60 | Industry/concept board fund-flow ranking. |
+| `board_fund_flow` | `board_type`, `page`, `page_size` | 60 | Industry/concept board fund-flow ranking (with 5/10-day totals). |
 | `chip_distribution` | `code`, `days`, `grid_size`, `decay` | 60 | Chip distribution (筹码分布) simulated locally from OHLC + turnover. |
 | `dividend_history` | `code` | 86400 | Dividend / bonus-share history (分红送转) for one stock. |
 | `etf_quotes` | `page`, `page_size` | 86400 | ETF market snapshot (price, turnover, market cap). |
 | `etf_share_history` | `code`, `page_size` | 86400 | ETF share-scale history parsed from Eastmoney fund archives. |
 | `fund_flow_backup` | `code` | 60 | Sina backup for one stock's realtime money flow. |
 | `fund_flow_history_backup` | `code`, `days` | 86400 | Sina daily capital-flow history used when Eastmoney flow history is down. |
-| `fund_flow_ranking` | `scope`, `page`, `page_size` | 60 | Realtime capital-flow ranking for stocks, industries or concepts. |
+| `fund_flow_ranking` | `scope`, `page`, `page_size` | 60 | Realtime capital-flow ranking for stocks, industries or concepts (with 5/10-day totals). |
 | `holder_number` | `code` | 86400 | Latest shareholder-count snapshot (股东户数) for one stock. |
 | `margin_detail` | `code`, `page_size` | 86400 | Per-stock margin financing (融资融券) history. |
 | `margin_market` | `days` | 86400 | Market-wide margin balance history. |
@@ -114,7 +114,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `cctv_news` | `date` | 86400 | CCTV Xinwen Lianbo item list for one date. |
 | `cls_telegraph` | `limit` | 60 | Cailianshe (CLS) 7x24 telegraph flashes. |
 | `cninfo_announcement_risk` | `code`, `start`, `end`, `limit` | 86400 | Classify recent announcements into structured risk events. |
-| `cninfo_announcements` | `code`, `start`, `end`, `category`, `limit`, `page` | 86400 | CNINFO announcements with PDF links (Shanghai/Shenzhen). |
+| `cninfo_announcements` | `code`, `start`, `end`, `category`, `limit`, `page` | 86400 | CNINFO announcements with PDF links (Shanghai/Shenzhen/Beijing). |
 | `eastmoney_global_news` | `limit` | 60 | Eastmoney 7x24 global fast news. |
 | `eastmoney_stock_news` | `code`, `limit` | 60 | Individual stock news from the Eastmoney quote-page feed. |
 | `szse_announcements` | `code`, `start`, `end`, `page`, `page_size` | 86400 | Shenzhen Stock Exchange official announcements (backup source). |

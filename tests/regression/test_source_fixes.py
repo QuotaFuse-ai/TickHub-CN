@@ -112,6 +112,31 @@ def test_datacenter_real_failure_still_raises(monkeypatch: pytest.MonkeyPatch) -
 # --------------------------------------------------------------------------- #
 
 
+def test_cninfo_queries_with_a_blank_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blank ``column`` lets CNINFO apply each board's own filing rules.
+
+    Pinning ``szse`` dropped Shenzhen 投资者关系管理信息 records; the query is
+    filtered by ``stock``, so ordering is unaffected either way.
+    """
+    posted: list[dict[str, object]] = []
+
+    def fake_request(_source: str, _method: str, _url: str, **kwargs: object) -> object:
+        payload = kwargs.get("data")
+        if isinstance(payload, dict) and "keyWord" in payload:
+            return [{"code": "600000", "orgId": "gssh0600000"}]
+        posted.append(dict(payload or {}))
+        return {"announcements": [], "totalAnnouncement": 0}
+
+    monkeypatch.setattr(announcements, "request", fake_request)
+
+    announcements.cninfo_announcements("600000", start="2026-07-01", end="2026-10-25")
+
+    query = posted[-1]
+    assert query["column"] == ""
+    assert query["stock"] == "600000,gssh0600000"
+    assert query["plate"] == ""
+
+
 def test_risk_events_take_the_cninfo_publish_time(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         announcements,

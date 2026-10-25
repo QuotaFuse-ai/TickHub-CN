@@ -42,7 +42,10 @@ def _cninfo_rows(
     payload = {
         "pageNum": str(max(1, int(page or 1))),
         "pageSize": str(max(1, min(int(page_size or 30), 100))),
-        "column": "szse",
+        # Blank lets CNINFO apply its own per-exchange rules: a fixed "szse"
+        # silently drops filings that are only classified under the issuer's
+        # own board (e.g. investor-relations records on Shenzhen names).
+        "column": "",
         "tabName": "fulltext",
         "plate": "",
         # An empty org id makes CNINFO search every issuer, so it must be resolved.
@@ -92,7 +95,7 @@ def _cninfo_rows(
 
 @tool("cninfo_announcements", layer="announcements", ttl="semi_static", cache_domain="announcement")
 def cninfo_announcements(code: str, start: str = "", end: str = "", category: str = "", limit: int = 30, page: int = 1) -> dict[str, Any]:
-    """CNINFO announcements with PDF links (Shanghai/Shenzhen)."""
+    """CNINFO announcements with PDF links (Shanghai/Shenzhen/Beijing)."""
     c = code_or_raise(code)
     start_date = require_date(start or None, "")
     end_date = require_date(end or None, "")

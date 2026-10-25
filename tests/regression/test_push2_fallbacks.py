@@ -132,6 +132,48 @@ def test_realtime_fund_flow_falls_back_to_sina(monkeypatch: pytest.MonkeyPatch) 
 # --------------------------------------------------------------------------- #
 
 
+def test_board_fund_flow_carries_5_and_10_day_totals(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_get(url: str, params: dict[str, object] | None = None, **_kwargs: object) -> object:
+        seen.update(params or {})
+        return {
+            "data": {
+                "total": 1,
+                "diff": [
+                    {
+                        "f12": "BK0447",
+                        "f14": "消费电子",
+                        "f2": 1234.5,
+                        "f3": 1.1,
+                        "f62": 111.0,
+                        "f184": 2.5,
+                        "f164": 555.0,
+                        "f165": 6.25,
+                        "f174": 777.0,
+                        "f175": 8.75,
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(funds, "em_get", fake_get)
+
+    out = funds.board_fund_flow("industry", page=1, page_size=20)
+
+    fields = str(seen["fields"]).split(",")
+    for field in ("f164", "f165", "f174", "f175"):
+        assert field in fields
+    assert seen["fs"] == "m:90+t:2"
+
+    item = out["data"]["items"][0]
+    assert item["main_net"] == 111.0
+    assert item["main_net_5d"] == 555.0
+    assert item["main_net_5d_pct"] == 6.25
+    assert item["main_net_10d"] == 777.0
+    assert item["main_net_10d_pct"] == 8.75
+
+
 def test_board_fund_flow_falls_back_to_sina(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
@@ -157,6 +199,7 @@ def test_board_fund_flow_falls_back_to_sina(monkeypatch: pytest.MonkeyPatch) -> 
     assert item["inflow"] == 3000000000.0
     assert item["leader_code"] == "sh600000"
     assert item["super_large_net"] is None
+    assert item["main_net_5d"] is None and item["main_net_10d"] is None
 
 
 def test_concept_flow_asks_sina_for_concept_classification(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,6 +274,7 @@ def test_stock_scope_ranking_falls_back_to_datacenter(monkeypatch: pytest.Monkey
     assert item["super_large_net"] == -130025385.0
     assert item["large_net"] == -37578096.0
     assert item["medium_net"] is None and item["small_net"] is None
+    assert item["main_net_5d"] is None and item["main_net_10d"] is None
     turnover = 202485751 / 0.1244
     assert item["main_net_pct"] == pytest.approx(-167603481 / turnover * 100, abs=1e-4)
     assert item["super_large_pct"] == pytest.approx(-130025385 / turnover * 100, abs=1e-4)
@@ -523,3 +567,49 @@ def test_sw_industry_index_preserves_the_push2_error(monkeypatch: pytest.MonkeyP
         indices.sw_industry_index("801010", _no_cache=True)
 
     assert exc.value.code == "QFSD-7001"
+
+
+# --------------------------------------------------------------------------- #
+# Northbound: a closed channel echoes its quota as if it were flow
+# --------------------------------------------------------------------------- #
+
+
+KAMT_CLOSED = {
+    "data": {
+        "hk2sh": {"status": 3, "dayNetAmtIn": 0.0, "dayAmtRemain": 0.0, "dayAmtThreshold": 5200000.0},
+        "hk2sz": {"status": 3, "dayNetAmtIn": 0.0, "dayAmtRemain": 0.0, "dayAmtThreshold": 5200000.0},
+        "sh2hk": {"status": 3, "dayNetAmtIn": 4200000.0, "dayAmtRemain": 0.0, "dayAmtThreshold": 4200000.0},
+        "sz2hk": {"status": 3, "dayNetAmtIn": 4200000.0, "dayAmtRemain": 0.0, "dayAmtThreshold": 4200000.0},
+    }
+}
+
+
+def test_northbound_quota_echo_counts_as_a_closed_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(funds, "em_get", lambda *_args, **_kwargs: KAMT_CLOSED)
+
+    out = funds.northbound_flow()
+
+    assert out["data"] == []
+    assert out["meta"]["closed"] is True
+    nets = {row["channel"]: row["net_inflow"] for row in out["meta"]["channels"]}
+    assert nets == {"hk2sh": 0.0, "hk2sz": 0.0, "sh2hk": 0.0, "sz2hk": 0.0}
+    assert {row["status"] for row in out["meta"]["channels"]} == {3}
+
+
+def test_northbound_reports_real_flow_during_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "data": {
+            "hk2sh": {"status": 1, "dayNetAmtIn": 123456789.0, "dayAmtIn": 123456.0, "dayAmtThreshold": 5200000.0},
+            "hk2sz": {"status": 1, "dayNetAmtIn": -5000.0, "dayAmtIn": 10.0, "dayAmtThreshold": 5200000.0},
+            "sh2hk": {"status": 1, "dayNetAmtIn": 4200000.0, "dayAmtIn": 420000.0, "dayAmtThreshold": 4200000.0},
+        }
+    }
+    monkeypatch.setattr(funds, "em_get", lambda *_args, **_kwargs: payload)
+
+    out = funds.northbound_flow()
+
+    rows = {row["channel"]: row for row in out["data"]["channels"]}
+    assert rows["hk2sh"]["net_inflow"] == 123456789.0
+    assert rows["hk2sz"]["net_inflow"] == -5000.0
+    assert rows["sh2hk"]["net_inflow"] == 0.0
+    assert out["meta"]["closed"] is False

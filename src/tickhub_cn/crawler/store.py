@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS risk_event (
     title TEXT, source TEXT, crawl_time TEXT, payload TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_risk_code ON risk_event(code, event_date DESC);
+CREATE TABLE IF NOT EXISTS northbound_flow (
+    item_id TEXT PRIMARY KEY, trade_date TEXT, channel TEXT, name TEXT,
+    net_inflow REAL, net_inflow_wan REAL, status INTEGER, source TEXT,
+    snapshot_at TEXT, payload TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_northbound_date ON northbound_flow(trade_date DESC, channel);
 CREATE TABLE IF NOT EXISTS crawl_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task TEXT, started_at TEXT, finished_at TEXT, status TEXT,
@@ -196,6 +202,55 @@ class Archive:
                 inserted += int(cur.rowcount or 0)
         return inserted
 
+    def insert_northbound(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        trade_date: str,
+        source: str = "eastmoney",
+        snapshot_at: str = "",
+    ) -> int:
+        """Upsert one channel snapshot; returns how many rows were new.
+
+        Repeated samples on the same day overwrite the row so the latest one
+        (closest to the close) becomes that day's value.
+        """
+        inserted = 0
+        stamp = snapshot_at or _now()
+        with self._lock, self.connect() as con:
+            for row in rows or []:
+                channel = str(row.get("channel") or "")
+                if not channel:
+                    continue
+                item_id = f"{source}:{trade_date}:{channel}"
+                exists = con.execute(
+                    "SELECT 1 FROM northbound_flow WHERE item_id=?", (item_id,)
+                ).fetchone()
+                con.execute(
+                    "INSERT INTO northbound_flow"
+                    " (item_id, trade_date, channel, name, net_inflow, net_inflow_wan, status,"
+                    "  source, snapshot_at, payload)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(item_id) DO UPDATE SET"
+                    "  name=excluded.name, net_inflow=excluded.net_inflow,"
+                    "  net_inflow_wan=excluded.net_inflow_wan, status=excluded.status,"
+                    "  snapshot_at=excluded.snapshot_at, payload=excluded.payload",
+                    (
+                        item_id,
+                        trade_date,
+                        channel,
+                        str(row.get("name") or ""),
+                        row.get("net_inflow"),
+                        row.get("net_inflow_wan"),
+                        row.get("status"),
+                        source,
+                        stamp,
+                        json.dumps(row, ensure_ascii=False, default=str),
+                    ),
+                )
+                inserted += int(exists is None)
+        return inserted
+
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:
         with self._lock, self.connect() as con:
             cur = con.execute(
@@ -232,13 +287,13 @@ class Archive:
     # ------------------------------------------------------------------ reads
 
     def query(self, table: str, *, code: str = "", limit: int = 50, order: str = "crawl_time") -> list[dict[str, Any]]:
-        allowed = {"announcement", "research_report", "risk_event", "crawl_task"}
+        allowed = {"announcement", "research_report", "risk_event", "crawl_task", "northbound_flow"}
         if table not in allowed:
             raise ValueError(f"unsupported archive table: {table}")
         sql = f"SELECT * FROM {table}"
         params: list[Any] = []
         if code:
-            column = "code" if table != "crawl_task" else "detail"
+            column = {"crawl_task": "detail", "northbound_flow": "channel"}.get(table, "code")
             sql += f" WHERE {column} LIKE ?"
             params.append(f"%{code}%")
         sql += f" ORDER BY {order} DESC LIMIT ?"
@@ -262,6 +317,17 @@ class Archive:
     def risks(self, code: str = "", limit: int = 200) -> list[dict[str, Any]]:
         return self.query("risk_event", code=code, limit=limit, order="event_date")
 
+    def northbound(self, trade_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM northbound_flow"
+        params: list[Any] = []
+        if trade_date:
+            sql += " WHERE trade_date=?"
+            params.append(trade_date)
+        sql += " ORDER BY trade_date DESC, channel LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        with self.connect() as con:
+            return [dict(r) for r in con.execute(sql, params).fetchall()]
+
     def tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.query("crawl_task", limit=limit, order="started_at")
 
@@ -277,7 +343,7 @@ class Archive:
         return dict(row) if row else None
 
     def stats(self) -> dict[str, Any]:
-        tables = ("announcement", "research_report", "risk_event", "crawl_task")
+        tables = ("announcement", "research_report", "risk_event", "northbound_flow", "crawl_task")
         out: dict[str, Any] = {"path": str(self.path), "size_kb": 0}
         try:
             out["size_kb"] = round(self.path.stat().st_size / 1024, 1)

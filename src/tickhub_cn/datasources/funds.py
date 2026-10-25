@@ -46,7 +46,8 @@ _SCOPES = {
     "sz": "m:0+t:6,m:0+t:80",
 }
 
-_FLOW_FIELDS = "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87"
+# f164/f165 = 5-day main net/pct, f174/f175 = 10-day main net/pct.
+_FLOW_FIELDS = "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f164,f165,f174,f175"
 
 
 def _fflow_row(line: str) -> dict[str, Any] | None:
@@ -146,7 +147,7 @@ def _sina_stock_flow(code: str, limit: int) -> dict[str, Any]:
 
 @tool(layer="funds", ttl="realtime")
 def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -> dict[str, Any]:
-    """Realtime capital-flow ranking for stocks, industries or concepts."""
+    """Realtime capital-flow ranking for stocks, industries or concepts (with 5/10-day totals)."""
     key = str(scope or "all").strip().lower()
     if key not in _SCOPES:
         raise TickHubError("QFSD-9001", f"invalid scope: {scope}", detail={"allowed": sorted(_SCOPES)})
@@ -195,6 +196,10 @@ def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -
             "medium_pct": to_float(r.get("f81")),
             "small_net": to_float(r.get("f84")),
             "small_pct": to_float(r.get("f87")),
+            "main_net_5d": to_float(r.get("f164")),
+            "main_net_5d_pct": to_float(r.get("f165")),
+            "main_net_10d": to_float(r.get("f174")),
+            "main_net_10d_pct": to_float(r.get("f175")),
         }
         for r in raw
     ]
@@ -284,6 +289,10 @@ def _datacenter_stock_flow(key: str, page: int, page_size: int) -> dict[str, Any
                 "medium_pct": None,
                 "small_net": None,
                 "small_pct": None,
+                "main_net_5d": None,
+                "main_net_5d_pct": None,
+                "main_net_10d": None,
+                "main_net_10d_pct": None,
             }
         )
     trade_date = str(raw[0].get("TRADE_DATE") or "")[:10] or None
@@ -295,7 +304,7 @@ def _datacenter_stock_flow(key: str, page: int, page_size: int) -> dict[str, Any
         fallback_from="push2",
         degraded="eod_datacenter",
         data_as_of=trade_date,
-        note="push2 熔断，改用收盘日频排名：仅主力/超大单/大单口径，中单与小单为空",
+        note="push2 熔断，改用收盘日频排名：仅主力/超大单/大单口径，中单、小单与 5/10 日累计为空",
     )
     out["data"] = {
         "scope": key,
@@ -340,6 +349,10 @@ def _sina_board_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
             "medium_pct": None,
             "small_net": None,
             "small_pct": None,
+            "main_net_5d": None,
+            "main_net_5d_pct": None,
+            "main_net_10d": None,
+            "main_net_10d_pct": None,
             "inflow": to_float(r.get("inamount")),
             "outflow": to_float(r.get("outamount")),
             "leader_code": r.get("ts_symbol"),
@@ -356,7 +369,7 @@ def _sina_board_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
         source_url=_SINA_BOARD_FLOW,
         scope=key,
         fallback_from="eastmoney",
-        note="新浪板块代码与东财 BK 代码不同；仅提供主力净流入，四档拆分为 null",
+        note="新浪板块代码与东财 BK 代码不同；仅提供主力净流入，四档拆分与 5/10 日累计为 null",
     )
     out["data"] = {"scope": key, "total": None, "page": page, "page_size": page_size, "items": rows}
     return out
@@ -364,7 +377,7 @@ def _sina_board_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
 
 @tool(layer="funds", ttl="realtime")
 def board_fund_flow(board_type: str = "industry", page: int = 1, page_size: int = 100) -> dict[str, Any]:
-    """Industry/concept board fund-flow ranking."""
+    """Industry/concept board fund-flow ranking (with 5/10-day totals)."""
     key = str(board_type or "industry").strip().lower()
     if key not in {"industry", "concept"}:
         raise TickHubError("QFSD-9001", "board_type must be 'industry' or 'concept'")
@@ -489,23 +502,30 @@ def northbound_flow() -> dict[str, Any]:
     }
     rows = []
     active = False
+    closed = False
     for key, label in channels.items():
         block = data.get(key) or {}
         net = to_float(block.get("dayNetAmtIn"))
-        if net:
+        quota = to_float(block.get("dayAmtThreshold"))
+        status = to_int(block.get("status"))
+        # Outside the session a channel echoes its whole daily quota back as
+        # ``dayNetAmtIn``; that number is a placeholder, not money that moved.
+        placeholder = bool(quota) and net == quota
+        if net and not placeholder:
             active = True
+        closed = closed or status == 3
         rows.append(
             {
                 "channel": key,
                 "name": label,
-                "net_inflow": net,
+                "net_inflow": 0.0 if placeholder else net,
                 "net_inflow_wan": to_float(block.get("dayAmtIn")),
-                "status": to_int(block.get("status")),
+                "status": status,
             }
         )
     if not active:
-        return empty("eastmoney", "northbound closed or not yet published", channels=rows)
-    return ok({"channels": rows}, "eastmoney", extra={"count": len(rows)})
+        return empty("eastmoney", "northbound closed or not yet published", channels=rows, closed=closed)
+    return ok({"channels": rows}, "eastmoney", extra={"count": len(rows), "closed": closed})
 
 
 @tool(layer="funds", ttl="semi_static")

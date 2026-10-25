@@ -266,7 +266,7 @@ def _progress(state: State) -> Callable[[dict[str, Any]], None]:
 def start_all_cmd(
     host: str = typer.Option("127.0.0.1", "--host", help="MCP HTTP bind address."),
     port: int = typer.Option(8000, "--port", help="MCP HTTP port (the only listening socket)."),
-    task: str = typer.Option("all", "--task", help="Crawler task: all | announcements | reports | risks."),
+    task: str = typer.Option("all", "--task", help="Crawler task: all | announcements | reports | risks | northbound."),
     crawler: str = typer.Option("auto", "--crawler", help="auto (OFFLINE_CRAWLER_ENABLE) | on | off."),
     restart_limit: int = typer.Option(3, "--restart-limit", help="Child restarts allowed inside a 5 minute window."),
 ) -> None:
@@ -713,7 +713,7 @@ def crawler_status(ctx: typer.Context, output: Optional[str] = _out_opt()) -> No
 @crawler_app.command("run")
 def crawler_run(
     ctx: typer.Context,
-    task: str = typer.Option("all", "--task", help="all | announcements | reports | risks."),
+    task: str = typer.Option("all", "--task", help="all | announcements | reports | risks | northbound."),
     codes: str = typer.Option("", "--codes", help="Comma-separated codes; defaults to the watchlist."),
     days: int = typer.Option(7, "--days", help="Look-back window in days."),
     limit: Optional[int] = typer.Option(None, "--limit", help="Codes per run."),

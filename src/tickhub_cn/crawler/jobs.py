@@ -17,11 +17,12 @@ from typing import Any, Callable, Iterable
 
 from ..cache.redis_cache import get_cache
 from ..core.config import get_settings
+from ..datasources.util import last_trading_day, now_shanghai
 from ..logging.setup import get_logger
 from ..risk.events import classify_announcement
 from .store import get_archive, item_key
 
-TASKS = ("announcements", "reports", "risks")
+TASKS = ("announcements", "reports", "risks", "northbound")
 DEFAULT_INDEX = "000300"
 DEDUPE_TTL = 7 * 24 * 3600
 PAGE_LIMIT = 50
@@ -286,6 +287,57 @@ def crawl_reports(
     return result
 
 
+def crawl_northbound(*, progress: Progress | None = None, should_stop: StopCheck | None = None) -> TaskResult:
+    """Snapshot the northbound/southbound flow once per trading day.
+
+    The trade date comes from weekday arithmetic, not from the calendar tool:
+    the calendar itself calls push2, which is exactly what this snapshot is
+    meant to spare later readers. A closed session writes nothing, otherwise a
+    weekend run would overwrite the last trading day's real numbers.
+    """
+    archive = get_archive()
+    result = TaskResult(task="northbound")
+    if should_stop is not None and should_stop():
+        result.status = "cancelled"
+        result.detail["cancelled"] = True
+        return result
+
+    trade_date = last_trading_day()
+    result.detail["trade_date"] = trade_date
+    try:
+        payload = _call("northbound_flow")
+    except Exception as exc:
+        result.failed.append("northbound")
+        result.errors["northbound"] = str(exc)[:300]
+        result.status = "failed"
+        result.detail["cancelled"] = False
+        return result
+
+    rows = _rows(payload, "channels")
+    meta = payload.get("meta") if isinstance(payload, dict) else {}
+    result.fetched = len(rows)
+    result.detail["cancelled"] = False
+    if not rows:
+        result.detail.update(
+            {
+                "stored": False,
+                "closed": bool((meta or {}).get("closed")),
+                "note": (meta or {}).get("note") or "northbound returned no channel data",
+            }
+        )
+        return result
+
+    result.inserted = archive.insert_northbound(
+        rows,
+        trade_date=trade_date,
+        snapshot_at=now_shanghai().strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+    result.detail["stored"] = True
+    if progress:
+        progress({"task": "northbound", "fetched": len(rows), "inserted": result.inserted})
+    return result
+
+
 def crawl_risks(
     codes: Iterable[str],
     *,
@@ -338,7 +390,7 @@ def run_task(
     progress: Progress | None = None,
     should_stop: StopCheck | None = None,
 ) -> dict[str, Any]:
-    """Run one crawl task (``announcements`` / ``reports`` / ``risks`` / ``all``).
+    """Run one crawl task (``announcements`` / ``reports`` / ``risks`` / ``northbound`` / ``all``).
 
     ``should_stop`` is polled between codes and between sub-tasks. A cancelled
     run keeps whatever already landed in the archive, skips the remaining
@@ -384,6 +436,9 @@ def run_task(
         if "risks" in plan and not cancelled and not stop():
             results.append(crawl_risks(watchlist, progress=progress, should_stop=should_stop))
             cancelled = results[-1].status == "cancelled"
+        if "northbound" in plan and not cancelled and not stop():
+            results.append(crawl_northbound(progress=progress, should_stop=should_stop))
+            cancelled = results[-1].status == "cancelled"
     except Exception as exc:
         elapsed = (_dt.datetime.now() - started).total_seconds()
         archive.finish_task(task_id, status="failed", error=str(exc), detail={"elapsed_s": round(elapsed, 1)})
@@ -399,7 +454,7 @@ def run_task(
     cancelled = cancelled or stop()
     if cancelled:
         status = "cancelled"
-    elif not watchlist:
+    elif not watchlist and not fetched:
         status = "empty"
     elif failed:
         status = "partial" if fetched or inserted else "failed"
@@ -484,6 +539,7 @@ __all__ = [
     "TaskResult",
     "archive_announcements",
     "crawl_announcements",
+    "crawl_northbound",
     "crawl_reports",
     "crawl_risks",
     "crawl_status",
