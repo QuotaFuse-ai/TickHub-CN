@@ -1,18 +1,3 @@
-<div align="center">
-
-# TickHub-CN
-
-**A 股全栈数据 · 14 层工具 · 124 个 MCP 工具 + 25 个兼容别名**
-
-面向 AI Agent 的 A 股数据服务：同一个工具面，同时提供 MCP stdio、MCP Streamable HTTP、命令行（`th-cn`）和 Python 库四种用法。
-
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-149%20names-orange)](docs/MCP_API_CONTRACT.md)
-[![Layers](https://img.shields.io/badge/layers-14-9cf)](docs/DATA_MODEL.md)
-
-</div>
-
 TickHub-CN 只做一件事：**把 A 股数据变成模型可以直接调用的结构化工具**。
 产品围绕一条规则构建 —— **模型报告的每一个数字都必须来自一次工具调用**。
 行情、财报、资金、公告、研报、宏观、指数、期货、期权、可转债，全部由服务端抓取、
