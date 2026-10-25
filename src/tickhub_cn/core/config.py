@@ -56,6 +56,8 @@ class Settings:
     cache_env: str = "prod"
     http_timeout: float = 15.0
     http_retries: int = 2
+    # Opt-in: retry szse.cn over plain HTTP after a reset connection.
+    szse_allow_http: bool = False
 
     # sources
     iwencai_api_key: str = ""
@@ -139,6 +141,7 @@ class Settings:
             cache_env=g("CACHE_ENV", "prod"),
             http_timeout=_float(g("HTTP_TIMEOUT"), 15.0),
             http_retries=_int(g("HTTP_RETRIES"), 2),
+            szse_allow_http=_bool(g("SZSE_ALLOW_HTTP"), False),
             iwencai_api_key=g("IWENCAI_API_KEY"),
             iwencai_base_url=g("IWENCAI_BASE_URL", "https://openapi.iwencai.com"),
             tushare_token=g("TUSHARE_TOKEN"),

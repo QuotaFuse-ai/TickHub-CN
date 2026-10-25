@@ -95,6 +95,90 @@ def test_write_actions_are_guarded_by_readonly() -> None:
     assert "guardReadonly" in html
 
 
+def _script(html: str) -> str:
+    return "\n".join(re.findall(r"<script>(.*?)</script>", html, flags=re.S))
+
+
+def test_page_filters_tables_from_a_global_search_box() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert 'id="search"' in html
+    assert 'id="hits"' in html
+    assert "function applySearch(" in html
+    # Rows are filtered after every view swap, not only on keystrokes.
+    assert 'new MutationObserver(applySearch).observe($("#view")' in html
+    assert "row.hidden = !hit" in html
+
+
+def test_page_binds_keyboard_shortcuts_behind_a_typing_guard() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert 'id="shortcuts"' in html
+    assert 'id="shortcut-list"' in html
+    assert "function isTyping(" in html
+    assert 'event.key === "/"' in html
+    assert 'event.key === "?"' in html
+    assert 'key === "k"' in html
+    assert "event.altKey" in html
+    # Typing in a field must never trigger the single-key shortcuts.
+    assert "if (isTyping(event) || mod) return;" in html
+
+
+def test_page_exports_the_current_view_as_csv() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert "function csvCell(" in html
+    assert "function exportView(" in html
+    assert "new Blob(" in html
+    assert "text/csv;charset=utf-8" in html
+    assert "link.download = name" in html
+    # Hidden rows (filtered out by search) stay out of the export.
+    assert "if (row.hidden) return;" in html
+
+
+def test_csv_cells_escape_quotes_commas_and_newlines(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+
+    script = _script(ADMIN_PAGE.read_text(encoding="utf-8"))
+    match = re.search(r"function csvCell\(.*?\n\}\n", script, flags=re.S)
+    assert match
+    probe = match.group(0) + r'''
+const rows = [csvCell("a,b"), csvCell('say "hi"'), csvCell("x\ny"), csvCell(3), csvCell(null)];
+process.stdout.write(JSON.stringify(rows));
+'''
+    source = tmp_path / "csv_cell.js"
+    source.write_text(probe, encoding="utf-8")
+    result = subprocess.run([node, str(source)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ['"a,b"', '"say ""hi"""', '"x\ny"', "3", ""]
+
+
+def test_page_offers_a_manual_three_state_theme() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert 'id="theme"' in html
+    assert 'document.documentElement.dataset.theme' in html
+    assert 'localStorage.setItem("tickhub_admin_theme"' in html
+    assert 'const THEMES = ["auto", "light", "dark"];' in html
+    assert ':root[data-theme="dark"]' in html
+    # Without JS the page still follows the system preference.
+    assert "@media (prefers-color-scheme: dark)" in html
+
+
+def test_page_glossary_matches_the_error_registry() -> None:
+    from tickhub_cn.core.errors import ERROR_CODES
+
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert set(re.findall(r"QFSD-\d{4}", html)) == set(ERROR_CODES)
+    assert "function codeNotes(" in html
+    assert "function codeHelpHtml(" in html
+    # Errors shown through the toast carry the glossary too.
+    assert "box.textContent = isError ? explain(message) : message;" in html
+    assert 'id="code-list"' in html
+
+
 @pytest.mark.parametrize("path", ["/api/status", "/api/config", "/api/audit"])
 def test_served_page_can_authenticate(path: str) -> None:
     client = _client()

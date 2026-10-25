@@ -11,13 +11,26 @@ from ..core.http import em_datacenter, em_get, request
 from ..core.ticker import compact_date, eastmoney_secid, market_of, normalize_code
 from .base import tool
 from .emdc import DATACENTER, strict_rows as _strict_rows
-from .util import empty, frame, last_trading_day, now_shanghai, ok, require_date, stock_code, to_float, to_int
+from .util import (
+    empty,
+    frame,
+    js_json,
+    last_trading_day,
+    now_shanghai,
+    ok,
+    require_date,
+    stock_code,
+    to_float,
+    to_int,
+)
 
 _CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
 _PUSH2 = "https://push2.eastmoney.com/api/qt/stock/get"
 _PUSH2HIS = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _PUSH2EX = "https://push2ex.eastmoney.com"
 _SLIST = "https://push2.eastmoney.com/api/qt/slist/get"
+_SINA_INDUSTRY = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+_SINA_CONCEPT = "https://vip.stock.finance.sina.com.cn/q/view/newFLJK.php"
 _THS_HOT = "https://dq.10jqka.com.cn/fuyao/hot_list_data/out/hot_list/v1/stock"
 _THS_ZT = "https://data.10jqka.com.cn/dataapi/limit_up/limit_up_pool"
 _EM_RANK = "https://emappdata.eastmoney.com/stockrank/getAllCurrentList"
@@ -137,7 +150,12 @@ def industry_boards(page: int = 1, page_size: int = 100) -> dict[str, Any]:
     """Industry board ranking (东方财富行业板块) with main capital flow."""
     page = max(1, int(page or 1))
     page_size = min(max(1, int(page_size or 100)), 500)
-    payload = _clist("m:90+t:2+f:!50", _BOARD_FIELDS, page=page, page_size=page_size)
+    try:
+        payload = _clist("m:90+t:2+f:!50", _BOARD_FIELDS, page=page, page_size=page_size)
+    except TickHubError:
+        return _sina_boards("industry", page, page_size)
+    if not payload["items"]:
+        return _sina_boards("industry", page, page_size)
     rows = [_board_row(r) for r in payload["items"]]
     out = frame(rows, "eastmoney", source_url=_CLIST)
     out["data"] = {"total": payload["total"], "page": page, "page_size": page_size, "items": rows}
@@ -149,10 +167,73 @@ def concept_boards(page: int = 1, page_size: int = 100) -> dict[str, Any]:
     """Concept board ranking (东方财富概念板块)."""
     page = max(1, int(page or 1))
     page_size = min(max(1, int(page_size or 100)), 500)
-    payload = _clist("m:90+t:3+f:!50", _BOARD_FIELDS, page=page, page_size=page_size)
+    try:
+        payload = _clist("m:90+t:3+f:!50", _BOARD_FIELDS, page=page, page_size=page_size)
+    except TickHubError:
+        return _sina_boards("concept", page, page_size)
+    if not payload["items"]:
+        return _sina_boards("concept", page, page_size)
     rows = [_board_row(r) for r in payload["items"]]
     out = frame(rows, "eastmoney", source_url=_CLIST)
     out["data"] = {"total": payload["total"], "page": page, "page_size": page_size, "items": rows}
+    return out
+
+
+def _sina_boards(kind: str, page: int, page_size: int) -> dict[str, Any]:
+    """Sina board roster (行业/概念) used when push2 cannot be reached."""
+    url = _SINA_INDUSTRY if kind == "industry" else _SINA_CONCEPT
+    params = None if kind == "industry" else {"param": "class"}
+    text = request(
+        "sina",
+        "GET",
+        url,
+        params=params,
+        headers={"Referer": "https://finance.sina.com.cn/"},
+        expect_json=False,
+    )
+    try:
+        payload = js_json(text)
+    except ValueError:
+        return empty("sina", "新浪板块列表不可用", kind=kind)
+    rows = []
+    # code,name,count,avg_price,avg_change,pct,turnover,volume,amount,leader_code,leader_chg_pct,leader_price,leader_name
+    for raw in (payload or {}).values():
+        fields = str(raw or "").split(",")
+        if len(fields) < 13:
+            continue
+        rows.append(
+            {
+                "board_code": fields[0],
+                "board_name": fields[1],
+                "price": to_float(fields[3]),
+                "change_pct": to_float(fields[5]),
+                "change": to_float(fields[4]),
+                "turnover_rate": to_float(fields[6]),
+                "main_net_inflow": None,
+                "main_net_ratio": None,
+                "up_count": None,
+                "down_count": None,
+                "leader_name": fields[12],
+                "leader_change_pct": to_float(fields[10]),
+                "leader_code": fields[9],
+                "member_count": to_int(fields[2]),
+                "volume": to_float(fields[7]),
+                "amount": to_float(fields[8]),
+            }
+        )
+    total = len(rows)
+    start = (page - 1) * page_size
+    items = rows[start : start + page_size]
+    if not items:
+        return empty("sina", "新浪板块列表不可用", kind=kind)
+    out = frame(
+        items,
+        "sina",
+        source_url=url,
+        fallback_from="eastmoney",
+        note="新浪板块代码与东财 BK 代码不同；主力净流入与涨跌家数为 null",
+    )
+    out["data"] = {"total": total, "page": page, "page_size": page_size, "items": items}
     return out
 
 

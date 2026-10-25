@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -88,6 +89,134 @@ def limiter_for(source: str) -> RateLimiter:
             cfg = SOURCE_LIMITS.get(source, (0.3, 60, 60))
             _LIMITERS[source] = RateLimiter(*cfg)
         return _LIMITERS[source]
+
+
+# push2 quotes are throttled upstream per source IP *and endpoint group*: one
+# burst silences every caller of that path for minutes, while sibling paths keep
+# answering. Pace each path separately instead of leaning on the 1s source gate.
+_PUSH2_HOSTS = frozenset({"push2.eastmoney.com", "push2his.eastmoney.com", "push2ex.eastmoney.com"})
+_PUSH2_EXEMPT_PATHS = frozenset({"/api/qt/kamt/get", "/api/qt/slist/get"})
+_NP_SUFFIX_RE = re.compile(r"\.np(?=/|$)")
+
+ENDPOINT_MIN_INTERVAL = 25.0
+ENDPOINT_MAX_CALLS = 3
+ENDPOINT_WINDOW = 60
+ENDPOINT_BREAKER_SECONDS = 600.0
+
+
+def endpoint_family(url: str) -> str | None:
+    """Throttling group for ``url``, or ``None`` when it is not a push2 quote path."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host not in _PUSH2_HOSTS:
+        return None
+    path = _NP_SUFFIX_RE.sub("", parsed.path.rstrip("/"))
+    if path in _PUSH2_EXEMPT_PATHS:
+        return None
+    return f"{host}{path}"
+
+
+_ENDPOINT_LIMITERS: dict[str, RateLimiter] = {}
+_ENDPOINT_LIMIT_LOCK = threading.Lock()
+
+
+def endpoint_limiter(family: str) -> RateLimiter:
+    with _ENDPOINT_LIMIT_LOCK:
+        if family not in _ENDPOINT_LIMITERS:
+            _ENDPOINT_LIMITERS[family] = RateLimiter(
+                ENDPOINT_MIN_INTERVAL, ENDPOINT_MAX_CALLS, ENDPOINT_WINDOW
+            )
+        return _ENDPOINT_LIMITERS[family]
+
+
+class EndpointBreaker:
+    """Cools an endpoint family down for a fixed window after a connection reset.
+
+    The upstream penalty latches for minutes, so retrying only burns attempts and
+    deepens the block. Tripping on the first reset is deliberate.
+    """
+
+    def __init__(self, cooldown: float = ENDPOINT_BREAKER_SECONDS) -> None:
+        self.cooldown = cooldown
+        self._until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def remaining(self, family: str) -> float:
+        with self._lock:
+            until = self._until.get(family)
+            if until is None:
+                return 0.0
+            left = until - time.monotonic()
+            if left <= 0:
+                self._until.pop(family, None)
+                return 0.0
+            return left
+
+    def trip(self, family: str) -> float:
+        with self._lock:
+            self._until[family] = time.monotonic() + self.cooldown
+            return self.cooldown
+
+    def open_families(self) -> dict[str, int]:
+        with self._lock:
+            now = time.monotonic()
+            return {
+                family: int(until - now + 0.999)
+                for family, until in self._until.items()
+                if until > now
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._until.clear()
+
+
+ENDPOINT_BREAKER = EndpointBreaker()
+
+_RESET_MARKERS = (
+    "connection reset",
+    "connection aborted",
+    "reset by peer",
+    "remote end closed connection",
+    "remotedisconnected",
+    "broken pipe",
+)
+
+
+def _is_connection_reset(exc: BaseException) -> bool:
+    if not isinstance(exc, (ConnectionResetError, requests.exceptions.ConnectionError)):
+        return False
+    text = f"{exc.__class__.__name__} {exc}".lower()
+    return any(marker in text for marker in _RESET_MARKERS)
+
+
+_RESET_CLASSES = frozenset(
+    {"ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError", "RemoteDisconnected"}
+)
+
+
+def is_connection_reset(exc: BaseException) -> bool:
+    """Reset test that also understands the errors ``fetch`` boxes into ``TickHubError``.
+
+    ``fetch`` reports transport trouble through ``detail["error"]`` (the original
+    class name) and its message, so the reset markers still apply; an HTTP status
+    error never matches because neither its class nor its text mentions a reset.
+    """
+    if isinstance(exc, TickHubError):
+        name = str((exc.detail or {}).get("error") or exc.__class__.__name__)
+    else:
+        name = exc.__class__.__name__
+    if name in _RESET_CLASSES:
+        return True
+    text = f"{name} {exc}".lower()
+    return any(marker in text for marker in _RESET_MARKERS)
+
+
+def reset_endpoint_guard() -> None:
+    """Clear limiters and breaker windows (tests / admin maintenance)."""
+    ENDPOINT_BREAKER.reset()
+    with _ENDPOINT_LIMIT_LOCK:
+        _ENDPOINT_LIMITERS.clear()
 
 
 class HealthRegistry:
@@ -263,10 +392,25 @@ def fetch(
     ``allow_status`` marks statuses that are a normal answer (an exchange file
     that does not exist that day) rather than a failure, so callers can tell a
     non-trading day apart from a broken endpoint.
+
+    push2 quote paths get an extra guard: a per-path rate gate plus a breaker
+    that opens on the first connection reset. While open, calls raise
+    ``QFSD-7001`` before any retry, so the tool wrapper can serve stale cache.
     """
     settings = get_settings()
     timeout = timeout or settings.http_timeout
     retries = settings.http_retries if retries is None else retries
+    family = endpoint_family(url)
+    if family:
+        cooldown = ENDPOINT_BREAKER.remaining(family)
+        if cooldown > 0:
+            raise TickHubError(
+                "QFSD-7001",
+                f"{family} 连接被重置，熔断中（约 {int(cooldown)} 秒后恢复）",
+                detail={"url": url, "endpoint": family, "retry_after_s": int(cooldown) + 1},
+                retryable=True,
+            )
+        endpoint_limiter(family).acquire()
     limiter_for(source).acquire()
     last_err: Exception | None = None
     tried: set[str] = set()
@@ -304,6 +448,18 @@ def fetch(
             if node is not None and isinstance(exc, PROXY_FAULTS):
                 _mark_node(node, False)
                 tried.add(node.id)
+            if family and _is_connection_reset(exc):
+                ENDPOINT_BREAKER.trip(family)
+                raise TickHubError(
+                    "QFSD-7001",
+                    f"{family} 连接被重置，已熔断 {int(ENDPOINT_BREAKER_SECONDS)} 秒",
+                    detail={
+                        "url": url,
+                        "endpoint": family,
+                        "retry_after_s": int(ENDPOINT_BREAKER_SECONDS),
+                    },
+                    retryable=True,
+                ) from exc
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 4) + random.uniform(0, 0.3))
                 continue

@@ -20,6 +20,8 @@ _PUSH2HIS = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 _CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
 _KAMT = "https://push2.eastmoney.com/api/qt/kamt/get"
 _SINA_FLOW = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssi_ssfx_flzjtj"
+_SINA_FLOW_HISTORY = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
+_SINA_BOARD_FLOW = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk"
 _SINA_NODE = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
 _FUND_GMB = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
 
@@ -55,26 +57,78 @@ def _fflow_row(line: str) -> dict[str, Any] | None:
     }
 
 
+def _pct(value: Any) -> float | None:
+    """Sina ratios are fractions; the tool contract reports percentages."""
+    raw = to_float(value)
+    return None if raw is None else round(raw * 100, 4)
+
+
 @tool(layer="funds", ttl="realtime")
 def stock_fund_flow(code: str, days: int = 60) -> dict[str, Any]:
     """Daily main/small/medium/large/super-large net inflow for one stock."""
     c = code_or_raise(code)
     limit = min(max(1, int(days or 60)), 1000)
-    payload = em_get(
-        _PUSH2HIS,
-        params={
-            "lmt": limit,
-            "klt": 101,
-            "secid": eastmoney_secid(c),
-            "fields1": "f1,f2,f3,f7",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
-        },
-    )
+    try:
+        payload = em_get(
+            _PUSH2HIS,
+            params={
+                "lmt": limit,
+                "klt": 101,
+                "secid": eastmoney_secid(c),
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+            },
+        )
+    except TickHubError:
+        return _sina_stock_flow(c, limit)
     data = (payload or {}).get("data") or {}
     rows = [r for r in (_fflow_row(line) for line in data.get("klines") or []) if r]
     if not rows:
-        return empty("eastmoney", "fund flow unavailable (non-trading day or no coverage)", code=c)
+        return _sina_stock_flow(c, limit)
     return ok({"code": c, "name": data.get("name"), "flows": rows}, "eastmoney", extra={"count": len(rows)})
+
+
+def _sina_stock_flow(code: str, limit: int) -> dict[str, Any]:
+    rows = request(
+        "sina",
+        "GET",
+        _SINA_FLOW_HISTORY,
+        params={"page": 1, "num": limit, "sort": "opendate", "asc": 0, "daima": sina_symbol(code)},
+        headers={"Referer": "https://finance.sina.com.cn/"},
+        encoding="gbk",
+    )
+    if not isinstance(rows, list) or not rows:
+        return empty("sina", "新浪资金流向历史不可用", code=code)
+    flows = []
+    for row in rows:
+        change = to_float(row.get("changeratio"))
+        flows.append(
+            {
+                "date": row.get("opendate"),
+                "main_net": to_float(row.get("netamount")),
+                "small_net": None,
+                "medium_net": None,
+                "large_net": None,
+                "super_large_net": to_float(row.get("r0_net")),
+                "main_pct": _pct(row.get("ratioamount")),
+                "small_pct": None,
+                "medium_pct": None,
+                "large_pct": None,
+                "super_large_pct": _pct(row.get("r0_ratio")),
+                "close": to_float(row.get("trade")),
+                "change_pct": None if change is None else round(change * 100, 4),
+            }
+        )
+    return ok(
+        {"code": code, "name": None, "flows": flows},
+        "sina",
+        source_url=_SINA_FLOW_HISTORY,
+        extra={
+            "count": len(flows),
+            "fallback_from": "eastmoney",
+            "note": "新浪历史只提供主力与超大单口径，中小单及对应占比为 null",
+        },
+    )
 
 
 @tool(layer="funds", ttl="realtime")
@@ -85,20 +139,25 @@ def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -
         raise TickHubError("QFSD-9001", f"invalid scope: {scope}", detail={"allowed": sorted(_SCOPES)})
     page = max(1, int(page or 1))
     page_size = min(max(1, int(page_size or 100)), 500)
-    payload = em_get(
-        _CLIST,
-        params={
-            "pn": page,
-            "pz": page_size,
-            "po": 1,
-            "np": 1,
-            "fltt": 2,
-            "invt": 2,
-            "fid": "f62",
-            "fs": _SCOPES[key],
-            "fields": _FLOW_FIELDS,
-        },
-    )
+    try:
+        payload = em_get(
+            _CLIST,
+            params={
+                "pn": page,
+                "pz": page_size,
+                "po": 1,
+                "np": 1,
+                "fltt": 2,
+                "invt": 2,
+                "fid": "f62",
+                "fs": _SCOPES[key],
+                "fields": _FLOW_FIELDS,
+            },
+        )
+    except TickHubError:
+        if key in {"industry", "concept"}:
+            return _sina_board_flow(key, page, page_size)
+        raise
     data = (payload or {}).get("data") or {}
     raw = data.get("diff") or []
     if isinstance(raw, dict):
@@ -123,9 +182,66 @@ def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -
         for r in raw
     ]
     if not rows:
+        if key in {"industry", "concept"}:
+            return _sina_board_flow(key, page, page_size)
         return empty("eastmoney", "fund-flow ranking unavailable", scope=key)
     out = frame(rows, "eastmoney", source_url=_CLIST, scope=key)
     out["data"] = {"scope": key, "total": to_int(data.get("total"), len(rows)), "page": page, "page_size": page_size, "items": rows}
+    return out
+
+
+def _sina_board_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
+    """Board flow ranking from Sina; stock scopes have no non-push2 equivalent."""
+    raw = request(
+        "sina",
+        "GET",
+        _SINA_BOARD_FLOW,
+        params={
+            "page": page,
+            "num": page_size,
+            "sort": "netamount",
+            "asc": 0,
+            "fenlei": 0 if key == "industry" else 1,
+        },
+        headers={"Referer": "https://finance.sina.com.cn/"},
+    )
+    if not isinstance(raw, list) or not raw:
+        return empty("sina", "新浪板块资金流不可用", scope=key)
+    rows = [
+        {
+            "code": r.get("category"),
+            "name": r.get("name"),
+            "price": to_float(r.get("avg_price")),
+            "change_pct": _pct(r.get("avg_changeratio")),
+            "main_net": to_float(r.get("netamount")),
+            "main_net_pct": _pct(r.get("ratioamount")),
+            "super_large_net": None,
+            "super_large_pct": None,
+            "large_net": None,
+            "large_pct": None,
+            "medium_net": None,
+            "medium_pct": None,
+            "small_net": None,
+            "small_pct": None,
+            "inflow": to_float(r.get("inamount")),
+            "outflow": to_float(r.get("outamount")),
+            "leader_code": r.get("ts_symbol"),
+            "leader_name": r.get("ts_name"),
+        }
+        for r in raw
+        if isinstance(r, dict)
+    ]
+    if not rows:
+        return empty("sina", "新浪板块资金流不可用", scope=key)
+    out = frame(
+        rows,
+        "sina",
+        source_url=_SINA_BOARD_FLOW,
+        scope=key,
+        fallback_from="eastmoney",
+        note="新浪板块代码与东财 BK 代码不同；仅提供主力净流入，四档拆分为 null",
+    )
+    out["data"] = {"scope": key, "total": None, "page": page, "page_size": page_size, "items": rows}
     return out
 
 
@@ -142,16 +258,19 @@ def board_fund_flow(board_type: str = "industry", page: int = 1, page_size: int 
 def realtime_fund_flow(code: str) -> dict[str, Any]:
     """Realtime snapshot of one stock's main-capital flow."""
     c = code_or_raise(code)
-    payload = em_get(
-        _PUSH2,
-        params={
-            "secid": eastmoney_secid(c),
-            "fields": "f57,f58,f43,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184",
-        },
-    )
+    try:
+        payload = em_get(
+            _PUSH2,
+            params={
+                "secid": eastmoney_secid(c),
+                "fields": "f57,f58,f43,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184",
+            },
+        )
+    except TickHubError:
+        return _sina_realtime_flow(c)
     data = (payload or {}).get("data") or {}
     if not data:
-        return empty("eastmoney", "realtime fund flow unavailable", code=c)
+        return _sina_realtime_flow(c)
     return ok(
         {
             "code": data.get("f57") or c,
@@ -165,6 +284,46 @@ def realtime_fund_flow(code: str) -> dict[str, Any]:
             "small_net": to_float(data.get("f84")),
         },
         "eastmoney",
+    )
+
+
+def _sina_realtime_flow(code: str) -> dict[str, Any]:
+    text = request("sina", "GET", _SINA_FLOW, params={"daima": sina_symbol(code)}, expect_json=False)
+    text = text.strip().rstrip(";")
+    if text.startswith("(") and text.endswith(")"):
+        text = text[1:-1]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return empty("sina", "新浪实时资金流不可用", code=code)
+    row = payload[0] if isinstance(payload, list) and payload else payload
+    if not isinstance(row, dict) or not row:
+        return empty("sina", "新浪实时资金流不可用", code=code)
+
+    def _net(prefix: str) -> float | None:
+        inflow, outflow = to_float(row.get(prefix + "_in")), to_float(row.get(prefix + "_out"))
+        return None if inflow is None or outflow is None else round(inflow - outflow, 2)
+
+    change = to_float(row.get("changeratio"))
+    return ok(
+        {
+            "code": code,
+            "name": row.get("name"),
+            "price": to_float(row.get("trade")),
+            "main_net": to_float(row.get("netamount")),
+            "main_net_pct": None,
+            "super_large_net": _net("r0"),
+            "large_net": _net("r1"),
+            "medium_net": _net("r2"),
+            "small_net": _net("r3"),
+            "change_pct": None if change is None else round(change * 100, 4),
+        },
+        "sina",
+        source_url=_SINA_FLOW,
+        extra={
+            "fallback_from": "eastmoney",
+            "note": "新浪实时口径不提供各档占比，pct 字段为 null",
+        },
     )
 
 

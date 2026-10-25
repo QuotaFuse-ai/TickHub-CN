@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import functools
 import inspect
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -76,6 +77,41 @@ def _apply_as_of(payload: Any, data_as_of: str | None) -> Any:
     return payload
 
 
+# Last successful payload for each cache key. Realtime entries expire after a
+# minute, but a rate-limited upstream must not turn a working tool into an error,
+# so the wrapper keeps a process-local copy to serve while the breaker is open.
+_LAST_GOOD: dict[str, Any] = {}
+_LAST_GOOD_LOCK = threading.Lock()
+_LAST_GOOD_LIMIT = 2048
+
+
+def _remember_last_good(key: str, payload: dict[str, Any]) -> None:
+    with _LAST_GOOD_LOCK:
+        if len(_LAST_GOOD) >= _LAST_GOOD_LIMIT:
+            _LAST_GOOD.clear()
+        _LAST_GOOD[key] = copy.deepcopy(payload)
+
+
+def _stale_payload(key: str, exc: TickHubError) -> dict[str, Any] | None:
+    if exc.code != "QFSD-7001":
+        return None
+    with _LAST_GOOD_LOCK:
+        cached = _LAST_GOOD.get(key)
+        if cached is None:
+            return None
+        payload = copy.deepcopy(cached)
+    payload.setdefault("meta", {}).update(
+        {
+            "cache_hit": True,
+            "stale": True,
+            "degraded": "stale_cache",
+            "error_code": exc.code,
+            "note": "上游限流/熔断，返回最近一次成功结果",
+        }
+    )
+    return payload
+
+
 def tool(
     name: str | None = None,
     *,
@@ -124,10 +160,17 @@ def tool(
                 )
                 cache = get_cache()
                 key = cache.key(domain, code, tool_name, call_kwargs)
-                payload, hit = cache.remember(key, ttl_seconds, producer, refresh=refresh)
-                if isinstance(payload, dict):
-                    payload = copy.deepcopy(payload)
-                    payload.setdefault("meta", {})["cache_hit"] = hit
+                try:
+                    payload, hit = cache.remember(key, ttl_seconds, producer, refresh=refresh)
+                except TickHubError as exc:
+                    payload = _stale_payload(key, exc)
+                    if payload is None:
+                        raise
+                else:
+                    if isinstance(payload, dict):
+                        payload = copy.deepcopy(payload)
+                        payload.setdefault("meta", {})["cache_hit"] = hit
+                        _remember_last_good(key, payload)
             else:
                 payload = producer()
 

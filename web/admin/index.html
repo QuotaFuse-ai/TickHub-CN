@@ -6,15 +6,25 @@
 <title>TickHub-CN 管理控制台</title>
 <style>
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --fg: #1d2430; --muted: #5b6675; --line: #d8dee8; --bg: #fff;
     --accent: #0b63c5; --ok: #12805c; --warn: #b25e09; --bad: #b42318;
     --soft: #f4f6fa;
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --fg: #e6eaf0; --muted: #9aa6b5; --line: #33404f; --bg: #151b23;
+    --accent: #6fb0ff; --ok: #4ad6a4; --warn: #f0a44a; --bad: #ff8a7a;
+    --soft: #1c242e;
+  }
+  /* Theme toggle is applied by script; this keeps a no-JS page dark-aware. */
   @media (prefers-color-scheme: dark) {
-    :root { --fg: #e6eaf0; --muted: #9aa6b5; --line: #33404f; --bg: #151b23;
-            --accent: #6fb0ff; --ok: #4ad6a4; --warn: #f0a44a; --bad: #ff8a7a;
-            --soft: #1c242e; }
+    :root:not([data-theme]) {
+      color-scheme: dark;
+      --fg: #e6eaf0; --muted: #9aa6b5; --line: #33404f; --bg: #151b23;
+      --accent: #6fb0ff; --ok: #4ad6a4; --warn: #f0a44a; --bad: #ff8a7a;
+      --soft: #1c242e;
+    }
   }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; display: flex; flex-direction: column;
@@ -75,6 +85,17 @@
            padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft);
            box-shadow: 0 6px 20px rgba(0,0,0,.18); display: none; white-space: pre-wrap; }
   .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }
+  #search { width: min(260px, 46vw); }
+  #hits[hidden], tbody tr[hidden] { display: none; }
+  kbd { padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
+        border-radius: 5px; background: var(--soft); font: 12px ui-monospace, Consolas, monospace; }
+  .codes { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  dialog { max-width: min(760px, calc(100vw - 32px)); max-height: 80vh; overflow: auto;
+           padding: 18px 22px; border: 1px solid var(--line); border-radius: 12px;
+           background: var(--bg); color: var(--fg); box-shadow: 0 18px 48px rgba(0,0,0,.3); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h3 { margin-top: 4px; }
+  dialog form { margin-top: 14px; text-align: right; }
   details summary { cursor: pointer; color: var(--muted); }
   .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
   .kv { display: grid; grid-template-columns: minmax(140px, 240px) minmax(0, 1fr); gap: 2px 14px; font-size: 13px; }
@@ -94,7 +115,15 @@
   <h1>TickHub-CN 管理控制台</h1>
   <span id="version" class="badge">未连接</span>
   <span id="ro" class="badge" hidden></span>
+  <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
+    搜索
+    <input id="search" type="search" placeholder="过滤当前页表格（Ctrl+K）" autocomplete="off" />
+  </label>
+  <span id="hits" class="badge" hidden></span>
   <span class="spacer"></span>
+  <button id="export" type="button" title="导出当前页表格为 CSV（Ctrl+E）">导出</button>
+  <button id="theme" type="button" title="切换主题：自动 / 浅色 / 深色（Ctrl+J）">主题：自动</button>
+  <button id="shortcut-button" type="button" title="快捷键与错误码释义（?）" aria-label="快捷键与错误码释义">?</button>
   <label style="flex-direction:row;align-items:center;gap:6px;white-space:nowrap;">
     管理令牌
     <input id="token" type="password" autocomplete="off" placeholder="ADMIN_AUTH_TOKEN（本机可留空）" style="width:min(230px,45vw);" />
@@ -121,6 +150,15 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 
+<dialog id="shortcuts" aria-labelledby="shortcuts-title">
+  <h2 id="shortcuts-title" style="font-size:16px;">快捷键</h2>
+  <div id="shortcut-list"></div>
+  <h3>错误码释义</h3>
+  <p class="muted" style="margin:0 0 8px;">后端返回的 <code>QFSD-xxxx</code> 在提示与结果里会附带这里的解释。</p>
+  <div id="code-list"></div>
+  <form method="dialog"><button type="submit" class="primary">关闭</button></form>
+</dialog>
+
 <script>
 "use strict";
 
@@ -133,6 +171,7 @@ const state = {
   tools: null,
   toolsView: null,
   mcpLayer: "",
+  theme: localStorage.getItem("tickhub_admin_theme") || "auto",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -151,9 +190,53 @@ function boolBadge(flag, good = "正常", bad = "异常") {
   return flag ? `<span class="badge ok">${esc(good)}</span>` : `<span class="badge bad">${esc(bad)}</span>`;
 }
 
+/* ---------------------------------------------------------- error codes */
+
+// Mirrors ERROR_CODES in src/tickhub_cn/core/errors.py (a UI test keeps them equal).
+const ERROR_CODES = {
+  "QFSD-1001": ["数据源超时", "切换备用源"],
+  "QFSD-1002": ["数据源空数据", "切源或返回空并标记"],
+  "QFSD-2001": ["Redis 不可用", "降级直连并告警"],
+  "QFSD-3001": ["字段映射配置错误", "回退全字段并告警"],
+  "QFSD-4001": ["财报勾稽失败", "标记 fail，阻断脏数据"],
+  "QFSD-5001": ["代理全池失效", "降级直连并告警"],
+  "QFSD-6001": ["Admin 鉴权失败", "拒绝并审计"],
+  "QFSD-7001": ["限流命中", "返回重试建议"],
+  "QFSD-8001": ["批量部分失败", "返回成功/失败列表"],
+  "QFSD-9001": ["参数错误", "修正参数"],
+  "QFSD-9002": ["当前数据源不支持该能力", "查看降级说明"],
+  "QFSD-9003": ["数据源返回异常", "重试或切源"],
+  "QFSD-9004": ["需要鉴权或 API Key", "配置密钥"],
+  "QFSD-9005": ["未找到数据", "确认代码/日期"],
+};
+
+function codeNotes(text) {
+  const seen = [];
+  for (const match of String(text === undefined || text === null ? "" : text).matchAll(/QFSD-\d{4}|QF-\d{4}/g)) {
+    const code = match[0].startsWith("QF-") ? "QFSD-" + match[0].slice(3) : match[0];
+    if (!seen.includes(code)) seen.push(code);
+  }
+  return seen.map((code) => {
+    const meta = ERROR_CODES[code] || ["未知错误码", "查看服务端日志"];
+    return `${code} ${meta[0]} → ${meta[1]}`;
+  });
+}
+
+function explain(text) {
+  const body = String(text === undefined || text === null ? "" : text);
+  const notes = codeNotes(body);
+  return notes.length ? `${body}\n错误码释义：\n${notes.join("\n")}` : body;
+}
+
+function codeHelpHtml(text) {
+  const notes = codeNotes(text);
+  if (!notes.length) return "";
+  return `<ul class="codes">${notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul>`;
+}
+
 function toast(message, isError) {
   const box = $("#toast");
-  box.textContent = message;
+  box.textContent = isError ? explain(message) : message;
   box.classList.toggle("err", Boolean(isError));
   box.style.display = "block";
   clearTimeout(toast._t);
@@ -240,6 +323,138 @@ async function runAction(button, fn) {
   try { await fn(); }
   catch (exc) { toast(exc.message || String(exc), true); }
   finally { button.textContent = original; button.disabled = Boolean(state.readonly); }
+}
+
+/* -------------------------------------------------------------- search */
+
+function applySearch() {
+  const query = $("#search").value.trim().toLowerCase();
+  const hits = $("#hits");
+  let total = 0;
+  let shown = 0;
+
+  document.querySelectorAll("#view table").forEach((table) => {
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      total += 1;
+      const hit = !query || row.textContent.toLowerCase().includes(query);
+      row.hidden = !hit;
+      if (hit) shown += 1;
+    });
+  });
+
+  if (!query) {
+    hits.hidden = true;
+    hits.textContent = "";
+    return;
+  }
+  hits.hidden = false;
+  if (!total) {
+    hits.textContent = "当前页无表格";
+    hits.className = "badge";
+    return;
+  }
+  hits.textContent = `匹配 ${shown} / ${total} 行`;
+  hits.className = "badge " + (shown ? "ok" : "warn");
+}
+
+/* -------------------------------------------------------------- export */
+
+function csvCell(value) {
+  const text = value === undefined || value === null ? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function download(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`已导出 ${name}`);
+}
+
+function exportView() {
+  const route = currentRoute();
+  const view = $("#view");
+  const tables = [...view.querySelectorAll("table")];
+  const lines = [`# TickHub-CN 管理控制台 / ${route} / ${new Date().toISOString()}`];
+
+  tables.forEach((table, index) => {
+    lines.push(`# 表 ${index + 1}`);
+    const header = table.querySelector("thead tr");
+    if (header) lines.push([...header.children].map((th) => csvCell(th.textContent)).join(","));
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      if (row.hidden) return;  // exported rows honour the active search
+      lines.push([...row.children].map((td) => csvCell(td.textContent)).join(","));
+    });
+  });
+
+  if (!tables.length) {
+    const text = view.innerText.trim();
+    if (!text) { toast("当前页没有可导出的内容", true); return; }
+    lines.push(csvCell(text));
+  }
+
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-`
+    + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  download(`tickhub-${route}-${stamp}.csv`, "\ufeff" + lines.join("\r\n"));
+}
+
+/* --------------------------------------------------------------- theme */
+
+const THEMES = ["auto", "light", "dark"];
+const THEME_LABELS = { auto: "主题：自动", light: "主题：浅色", dark: "主题：深色" };
+
+function resolveTheme(pref) {
+  if (pref === "light" || pref === "dark") return pref;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(pref) {
+  state.theme = THEMES.includes(pref) ? pref : "auto";
+  localStorage.setItem("tickhub_admin_theme", state.theme);
+  document.documentElement.dataset.theme = resolveTheme(state.theme);
+  $("#theme").textContent = THEME_LABELS[state.theme];
+}
+
+function cycleTheme() {
+  applyTheme(THEMES[(THEMES.indexOf(state.theme) + 1) % THEMES.length]);
+  toast(state.theme === "auto" ? "主题：跟随系统" : THEME_LABELS[state.theme]);
+}
+
+/* ---------------------------------------------------------- help dialog */
+
+function renderHelp() {
+  const shortcuts = [
+    ["Ctrl / ⌘ + K", "聚焦搜索框"],
+    ["/", "聚焦搜索框"],
+    ["Ctrl / ⌘ + E", "导出当前页（CSV，遵循当前搜索）"],
+    ["Ctrl / ⌘ + J", "切换主题：自动 / 浅色 / 深色"],
+    ["Alt + 1…9", "跳转到第 N 个页面"],
+    ["?", "打开本帮助"],
+    ["Esc", "清空搜索 / 关闭提示"],
+  ];
+  $("#shortcut-list").innerHTML = `<table><thead><tr><th>按键</th><th>作用</th></tr></thead><tbody>${
+    shortcuts.map(([keys, what]) => `<tr><td><kbd>${esc(keys)}</kbd></td><td>${esc(what)}</td></tr>`).join("")
+  }</tbody></table>`;
+  $("#code-list").innerHTML = `<table><thead><tr><th>错误码</th><th>含义</th><th>建议</th></tr></thead><tbody>${
+    Object.entries(ERROR_CODES).map(([code, [name, action]]) =>
+      `<tr><td><code>${esc(code)}</code></td><td>${esc(name)}</td><td>${esc(action)}</td></tr>`).join("")
+  }</tbody></table>`;
+}
+
+function openHelp() {
+  if (!$("#shortcuts").open) $("#shortcuts").showModal();
+}
+
+function isTyping(event) {
+  const tag = (event.target.tagName || "").toUpperCase();
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target.isContentEditable;
 }
 
 /* ------------------------------------------------------------ connection */
@@ -614,9 +829,10 @@ async function handleAction(action, button) {
       catch (_) { toast("参数不是合法 JSON", true); return; }
       try {
         const data = await post("/api/mcp/call", { tool, params });
-        show(pre(data.payload));
+        show(pre(data.payload) + codeHelpHtml(JSON.stringify(data.payload)));
       } catch (exc) {
-        show(pre(exc.payload || { error: exc.message }));
+        const payload = exc.payload || { error: exc.message };
+        show(pre(payload) + codeHelpHtml(JSON.stringify(payload)));
         throw exc;
       }
     });
@@ -628,7 +844,7 @@ async function handleAction(action, button) {
     const query = new URLSearchParams({ code, report_date: date });
     return runAction(button, async () => {
       const data = await api(`/api/crosscheck?${query}`);
-      show(pre(data.payload));
+      show(pre(data.payload) + codeHelpHtml(JSON.stringify(data.payload)));
     });
   }
 
@@ -696,7 +912,7 @@ async function renderRoute(force = false) {
     view.innerHTML = await views[route]();
   } catch (exc) {
     view.innerHTML = `<h2>加载失败</h2><p class="err">${esc(exc.message || String(exc))}</p>
-      <div class="row"><button type="button" class="primary" data-action="refresh-view">重试</button></div>`;
+      ${codeHelpHtml(exc.message)}<div class="row"><button type="button" class="primary" data-action="refresh-view">重试</button></div>`;
   } finally {
     rendering = false;
   }
@@ -711,12 +927,56 @@ function fmtDuration(seconds) {
   return `${s}秒`;
 }
 
-window.addEventListener("hashchange", () => renderRoute());
+window.addEventListener("hashchange", () => {
+  const search = $("#search");
+  if (search.value) { search.value = ""; applySearch(); }
+  renderRoute();
+});
 $("#connect").addEventListener("click", () => connect().then((ok) => { if (ok) renderRoute(true); }));
 $("#token").addEventListener("keydown", (event) => {
   if (event.key === "Enter") { event.preventDefault(); $("#connect").click(); }
 });
 
+/* ------------------------------------------- search / export / theme / help */
+
+$("#search").addEventListener("input", applySearch);
+$("#export").addEventListener("click", exportView);
+$("#theme").addEventListener("click", cycleTheme);
+$("#shortcut-button").addEventListener("click", openHelp);
+$("#shortcuts").addEventListener("close", () => $("#shortcut-button").focus());
+
+// Views swap innerHTML wholesale, so re-apply the filter whenever content lands.
+new MutationObserver(applySearch).observe($("#view"), { childList: true, subtree: true });
+
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  if (state.theme === "auto") applyTheme("auto");
+});
+
+document.addEventListener("keydown", (event) => {
+  const mod = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+  if (mod && key === "k") { event.preventDefault(); $("#search").focus(); $("#search").select(); return; }
+  if (mod && key === "e") { event.preventDefault(); exportView(); return; }
+  if (mod && key === "j") { event.preventDefault(); cycleTheme(); return; }
+  if (event.key === "Escape") {
+    if ($("#shortcuts").open) return;
+    const search = $("#search");
+    if (search.value) { search.value = ""; applySearch(); }
+    if (document.activeElement === search) search.blur();
+    $("#toast").style.display = "none";
+    return;
+  }
+  if (isTyping(event) || mod) return;
+  if (event.key === "/") { event.preventDefault(); $("#search").focus(); return; }
+  if (event.key === "?") { event.preventDefault(); openHelp(); return; }
+  if (event.altKey && /^[1-9]$/.test(event.key)) {
+    const route = ROUTES[Number(event.key) - 1];
+    if (route) { event.preventDefault(); location.hash = `#/${route}`; }
+  }
+});
+
+renderHelp();
+applyTheme(state.theme);
 $("#token").value = state.token;
 connect(true).then(() => renderRoute());
 </script>

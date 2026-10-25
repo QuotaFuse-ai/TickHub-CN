@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+from contextvars import ContextVar
 from typing import Any
 
-from ..core.http import request
+from ..core.config import get_settings
+from ..core.errors import TickHubError
+from ..core.http import is_connection_reset, request
 from ..core.ticker import compact_date, market_of, normalize_code
 from .base import tool
 from .util import (
@@ -86,6 +89,41 @@ def _szse_block(payload: Any) -> dict[str, Any]:
     return {}
 
 
+# szse.cn resets some connections at the TLS layer. SZSE_ALLOW_HTTP opts into a
+# one-shot plain-HTTP retry; the result is public disclosure data, but the plain
+# channel can be tampered with in transit, so it is off by default and flagged.
+_SZSE_HTTP_NOTE = (
+    "深交所接口 HTTPS 连接被重置，已按 SZSE_ALLOW_HTTP 开关回落到明文 HTTP；"
+    "数据为公开披露，但明文通道存在被中途篡改的风险"
+)
+_SZSE_PLAIN_HTTP: ContextVar[bool] = ContextVar("tickhub_szse_plain_http", default=False)
+
+
+def _reset_szse_transport() -> None:
+    _SZSE_PLAIN_HTTP.set(False)
+
+
+def _szse_request(method: str, url: str, **kwargs: Any) -> Any:
+    try:
+        return request("exchange", method, url, **kwargs)
+    except TickHubError as exc:
+        if not get_settings().szse_allow_http or not is_connection_reset(exc):
+            raise
+        _SZSE_PLAIN_HTTP.set(True)
+        plain = "http://" + url.split("://", 1)[-1]
+        return request("exchange", method, plain, **kwargs)
+
+
+def _szse_transport() -> dict[str, Any]:
+    return {"szse_transport": "http"} if _SZSE_PLAIN_HTTP.get() else {}
+
+
+def _szse_note(base: str | None) -> str | None:
+    if not _SZSE_PLAIN_HTTP.get():
+        return base
+    return f"{base}；{_SZSE_HTTP_NOTE}" if base else _SZSE_HTTP_NOTE
+
+
 # --------------------------------------------------------------------------- margin
 
 
@@ -143,7 +181,7 @@ def _szse_margin_rows(day: str, code: str, max_pages: int) -> list[dict[str, Any
     number = 1
     while number <= min(pages, max_pages):
         block = _szse_block(
-            request("exchange", "GET", _SZSE_REPORT, params={**params, "PAGENO": number}, headers=headers)
+            _szse_request("GET", _SZSE_REPORT, params={**params, "PAGENO": number}, headers=headers)
         )
         if number == 1:
             pages = to_int((block.get("metadata") or {}).get("pagecount"), 1) or 1
@@ -167,8 +205,7 @@ def _szse_margin_rows(day: str, code: str, max_pages: int) -> list[dict[str, Any
 
 def _szse_margin_summary(day: str) -> dict[str, Any] | None:
     block = _szse_block(
-        request(
-            "exchange",
+        _szse_request(
             "GET",
             _SZSE_REPORT,
             params={"SHOWTYPE": "JSON", "CATALOGID": "1837_xxpl", "TABKEY": "tab1", "txtDate": day, "PAGENO": 1},
@@ -231,6 +268,8 @@ def margin_trading_backup(
 
         raise TickHubError("QFSD-9001", f"invalid exchange: {exchange}", detail={"allowed": ["SSE", "SZSE", "BOTH"]})
 
+    _reset_szse_transport()
+
     # SZSE publishes T+1, so an implicit "latest session" is still blank during
     # the session itself: start one trading day earlier instead of returning an
     # empty table on every default call.
@@ -270,9 +309,10 @@ def margin_trading_backup(
         if not sz_part:
             return empty(
                 "szse",
-                f"深交所融资融券明细 {day} 无数据：{_szse_lag_note(day)}",
+                _szse_note(f"深交所融资融券明细 {day} 无数据：{_szse_lag_note(day)}"),
                 date=day,
                 exchange="SZSE",
+                **_szse_transport(),
             )
         return ok(
             {
@@ -288,22 +328,28 @@ def margin_trading_backup(
                 "records": sz_part,
             },
             "szse",
-            extra={"count": len(sz_part)},
-            note=backoff_note,
+            extra={"count": len(sz_part), **_szse_transport()},
+            note=_szse_note(backoff_note),
         )
 
     if not sse_part and not sz_part:
-        return empty("exchange", f"沪深两市融资融券明细 {day} 均无数据", date=day, exchange="BOTH")
-    payload = ok(
-        {"date": day, "exchange": "BOTH", "unit": UNIT_YUAN_SHARE, "sse": sse_part, "szse": sz_part},
-        "exchange",
-        extra={"count": len(sse_part) + len(sz_part)},
-        note=backoff_note,
-    )
+        return empty(
+            "exchange",
+            _szse_note(f"沪深两市融资融券明细 {day} 均无数据"),
+            date=day,
+            exchange="BOTH",
+            **_szse_transport(),
+        )
+    note = backoff_note
     if not sz_part:
         lag = _szse_lag_note(day)
-        payload["meta"]["note"] = f"{backoff_note}；{lag}" if backoff_note else lag
-    return payload
+        note = f"{note}；{lag}" if note else lag
+    return ok(
+        {"date": day, "exchange": "BOTH", "unit": UNIT_YUAN_SHARE, "sse": sse_part, "szse": sz_part},
+        "exchange",
+        extra={"count": len(sse_part) + len(sz_part), **_szse_transport()},
+        note=_szse_note(note),
+    )
 
 
 # -------------------------------------------------------------------- BSE quotes
@@ -440,7 +486,7 @@ def _szse_lhb_rows(day: str, max_pages: int) -> list[dict[str, Any]]:
     number = 1
     while number <= min(pages, max_pages):
         block = _szse_block(
-            request("exchange", "GET", _SZSE_REPORT, params={**params, "PAGENO": number}, headers=headers)
+            _szse_request("GET", _SZSE_REPORT, params={**params, "PAGENO": number}, headers=headers)
         )
         if number == 1:
             pages = to_int((block.get("metadata") or {}).get("pagecount"), 1) or 1
@@ -473,15 +519,17 @@ def _szse_lhb_rows(day: str, max_pages: int) -> list[dict[str, Any]]:
 def dragon_tiger_backup(trade_date: str = "", max_pages: int = 40) -> dict[str, Any]:
     """Exchange-official 龙虎榜 list for one trading day (SSE fixed-width + SZSE JSON)."""
     day = require_date(trade_date or None, last_trading_day())
+    _reset_szse_transport()
     sse_rows = _section_rows(day)
     szse_rows = _szse_lhb_rows(day, max(1, min(int(max_pages or 40), 120)))
     records = sse_rows + szse_rows
     if not records:
-        return empty("exchange", f"{day} 沪深交易所龙虎榜均未发布（非交易日或尚未披露）", date=day)
+        return empty("exchange", _szse_note(f"{day} 沪深交易所龙虎榜均未发布（非交易日或尚未披露）"), date=day, **_szse_transport())
     return ok(
         {"date": day, "unit": UNIT_YUAN_SHARE, "sse": sse_rows, "szse": szse_rows, "records": records},
         "exchange",
-        extra={"count": len(records)},
+        extra={"count": len(records), **_szse_transport()},
+        note=_szse_note(None),
     )
 
 
@@ -536,8 +584,7 @@ def _szse_announcements(code: str, page_size: int, page_index: int) -> list[dict
         "pageSize": max(1, min(int(page_size or 20), 100)),
         "pageNum": max(1, int(page_index or 1)),
     }
-    payload = request(
-        "exchange",
+    payload = _szse_request(
         "POST",
         _SZSE_ANNOUNCE,
         data=_json.dumps(body),
@@ -605,6 +652,7 @@ def _eastmoney_announcements(code: str, page_size: int, page_index: int) -> list
 def announcements_backup(code: str, page_size: int = 20, page_index: int = 1) -> dict[str, Any]:
     """Official-exchange announcement list with PDF links (SZSE direct, others via Eastmoney)."""
     c = code_or_raise(code)
+    _reset_szse_transport()
     if market_of(c) == "sz":
         rows = _szse_announcements(c, page_size, page_index)
         source = "szse"
@@ -612,8 +660,13 @@ def announcements_backup(code: str, page_size: int = 20, page_index: int = 1) ->
         rows = _eastmoney_announcements(c, page_size, page_index)
         source = "eastmoney"
     if not rows:
-        return empty(source, f"{c} 公告列表为空", code=c)
-    return ok({"code": c, "announcements": rows}, source, extra={"count": len(rows)})
+        return empty(source, _szse_note(f"{c} 公告列表为空"), code=c, **_szse_transport())
+    return ok(
+        {"code": c, "announcements": rows},
+        source,
+        extra={"count": len(rows), **_szse_transport()},
+        note=_szse_note(None),
+    )
 
 
 __all__ = [
