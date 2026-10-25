@@ -4,7 +4,7 @@ description: Use when a task needs real A-share market data through TickHub-CN �
 version: 0.1.0
 ---
 
-# TickHub-CN
+# TickHub-CN（A股数据枢纽）
 
 TickHub-CN is an MCP server, CLI and Python library that serves A-share data
 from exchanges, official disclosure sites and commercial aggregators. It
