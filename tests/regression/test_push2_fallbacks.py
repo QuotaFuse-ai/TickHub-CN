@@ -175,12 +175,112 @@ def test_concept_flow_asks_sina_for_concept_classification(monkeypatch: pytest.M
     assert out["data"]["scope"] == "concept"
 
 
-def test_stock_scope_has_no_sina_substitute(monkeypatch: pytest.MonkeyPatch) -> None:
+DATACENTER_ROW = {
+    "SECURITY_CODE": "000001",
+    "SECURITY_NAME_ABBR": "平安银行",
+    "TRADE_DATE": "2026-10-23 00:00:00",
+    "CLOSE_PRICE": 11.2,
+    "CHANGE_RATE": -0.885,
+    "PRIME_INFLOW": -167603481,
+    "SUPERDEAL_INFLOW": 202485751,
+    "SUPERDEAL_OUTFLOW": 332511136,
+    "BIGDEAL_INFLOW": 399074848,
+    "BIGDEAL_OUTFLOW": 436652944,
+    "BUY_SUPERDEAL_RATIO": 0.1244,
+    "BUY_BIGDEAL_RATIO": 0.2451,
+}
+
+
+def _fund_flow_em_get(seen: dict[str, object], rows: list[dict[str, object]] | None = None):
+    def fake(url: str, params: dict[str, object] | None = None, **_kwargs: object) -> object:
+        if "push2" in url:
+            return _blocked()
+        seen.update({"url": url, **(params or {})})
+        return {"success": True, "result": {"count": 5015, "data": rows if rows is not None else [DATACENTER_ROW]}}
+
+    return fake
+
+
+def test_stock_scope_ranking_falls_back_to_datacenter(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(funds, "em_get", _fund_flow_em_get(seen))
+    monkeypatch.setattr(funds, "request", lambda *_a, **_k: pytest.fail("stock scopes must not hit Sina"))
+
+    out = funds.fund_flow_ranking("all", page=2, page_size=50, _no_cache=True)
+
+    assert out["meta"]["source"] == "eastmoney"
+    assert out["meta"]["fallback_from"] == "push2"
+    assert out["meta"]["degraded"] == "eod_datacenter"
+    assert out["meta"]["data_as_of"] == "2026-10-23"
+    assert "中单" in out["meta"]["note"]
+    assert seen["reportName"] == "RPT_DMSK_TS_STOCKNEW"
+    assert seen["pageNumber"] == 2 and seen["pageSize"] == 50
+    assert seen["sortColumns"] == "PRIME_INFLOW" and seen["sortTypes"] == "-1"
+    assert seen["filter"] == (
+        '(TRADE_MARKET_CODE in ("069001001001","069001001006","069001002001","069001002002"))'
+    )
+    assert out["data"]["total"] == 5015
+    assert out["data"]["page"] == 2 and out["data"]["page_size"] == 50
+
+    item = out["data"]["items"][0]
+    assert item["code"] == "000001"
+    assert item["name"] == "平安银行"
+    assert item["price"] == 11.2
+    assert item["change_pct"] == -0.885
+    assert item["main_net"] == -167603481.0
+    assert item["super_large_net"] == -130025385.0
+    assert item["large_net"] == -37578096.0
+    assert item["medium_net"] is None and item["small_net"] is None
+    turnover = 202485751 / 0.1244
+    assert item["main_net_pct"] == pytest.approx(-167603481 / turnover * 100, abs=1e-4)
+    assert item["super_large_pct"] == pytest.approx(-130025385 / turnover * 100, abs=1e-4)
+    assert item["large_pct"] == pytest.approx(-37578096 / turnover * 100, abs=1e-4)
+
+
+@pytest.mark.parametrize(
+    ("scope", "markets", "absent"),
+    [
+        ("sh", ("069001001001", "069001001006"), ("069001002001", "069001002002")),
+        ("sz", ("069001002001", "069001002002"), ("069001001001", "069001001006")),
+    ],
+)
+def test_stock_scope_ranking_filters_the_requested_market(
+    monkeypatch: pytest.MonkeyPatch, scope: str, markets: tuple[str, ...], absent: tuple[str, ...]
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(funds, "em_get", _fund_flow_em_get(seen))
+    monkeypatch.setattr(funds, "request", lambda *_a, **_k: pytest.fail("stock scopes must not hit Sina"))
+
+    out = funds.fund_flow_ranking(scope, _no_cache=True)
+
+    flt = str(seen["filter"])
+    for market in markets:
+        assert market in flt
+    for market in absent:
+        assert market not in flt
+    assert out["data"]["scope"] == scope
+
+
+def test_stock_scope_ranking_reports_an_empty_substitute(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(funds, "em_get", _fund_flow_em_get({}, rows=[]))
+    monkeypatch.setattr(funds, "request", lambda *_a, **_k: pytest.fail("stock scopes must not hit Sina"))
+
+    out = funds.fund_flow_ranking("all", _no_cache=True)
+
+    assert out["ok"] is True
+    assert out["data"] == []
+    assert out["meta"]["degraded"] == "eod_datacenter"
+    assert "无数据" in out["meta"]["note"]
+
+
+def test_stock_scope_ranking_raises_the_push2_error_when_both_sources_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(funds, "em_get", _blocked)
     monkeypatch.setattr(funds, "request", lambda *_a, **_k: pytest.fail("stock scopes must not hit Sina"))
 
     with pytest.raises(TickHubError) as exc:
-        funds.fund_flow_ranking("all")
+        funds.fund_flow_ranking("all", _no_cache=True)
 
     assert exc.value.code == "QFSD-7001"
 

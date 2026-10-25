@@ -24,6 +24,19 @@ _SINA_FLOW_HISTORY = "https://vip.stock.finance.sina.com.cn/quotes_service/api/j
 _SINA_BOARD_FLOW = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk"
 _SINA_NODE = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
 _FUND_GMB = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+_DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_DATACENTER_REPORT = "RPT_DMSK_TS_STOCKNEW"
+_DATACENTER_COLUMNS = (
+    "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,"
+    "PRIME_INFLOW,SUPERDEAL_INFLOW,SUPERDEAL_OUTFLOW,BIGDEAL_INFLOW,BIGDEAL_OUTFLOW,"
+    "BUY_SUPERDEAL_RATIO,BUY_BIGDEAL_RATIO"
+)
+# 沪市主板/科创板 and 深市主板/创业板; B shares and 北交所 are outside the push2 scope.
+_DATACENTER_MARKETS = {
+    "all": ("069001001001", "069001001006", "069001002001", "069001002002"),
+    "sh": ("069001001001", "069001001006"),
+    "sz": ("069001002001", "069001002002"),
+}
 
 _SCOPES = {
     "all": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
@@ -154,10 +167,14 @@ def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -
                 "fields": _FLOW_FIELDS,
             },
         )
-    except TickHubError:
+    except TickHubError as exc:
         if key in {"industry", "concept"}:
             return _sina_board_flow(key, page, page_size)
-        raise
+        try:
+            return _datacenter_stock_flow(key, page, page_size)
+        except TickHubError:
+            # Keep the push2 error so the caller still gets the breaker's retry hint.
+            raise exc
     data = (payload or {}).get("data") or {}
     raw = data.get("diff") or []
     if isinstance(raw, dict):
@@ -190,8 +207,108 @@ def fund_flow_ranking(scope: str = "all", page: int = 1, page_size: int = 100) -
     return out
 
 
+def _datacenter_turnover(row: dict[str, Any]) -> float | None:
+    """Rebuild turnover from a tier's buy amount and its share of turnover."""
+    for amount_field, ratio_field in (
+        ("SUPERDEAL_INFLOW", "BUY_SUPERDEAL_RATIO"),
+        ("BIGDEAL_INFLOW", "BUY_BIGDEAL_RATIO"),
+    ):
+        amount = to_float(row.get(amount_field))
+        share = to_float(row.get(ratio_field))
+        if amount and amount > 0 and share and share > 0:
+            return amount / share
+    return None
+
+
+def _datacenter_pct(net: float | None, turnover: float | None) -> float | None:
+    if net is None or not turnover:
+        return None
+    return round(net / turnover * 100, 4)
+
+
+def _datacenter_net(row: dict[str, Any], inflow_field: str, outflow_field: str) -> float | None:
+    inflow = to_float(row.get(inflow_field))
+    outflow = to_float(row.get(outflow_field))
+    if inflow is None or outflow is None:
+        return None
+    return inflow - outflow
+
+
+def _datacenter_stock_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
+    """Close-of-day stock flow ranking from Eastmoney's datacenter (non-push2 host)."""
+    # The datacenter filter parser rejects whitespace inside ``in (...)``.
+    markets = ",".join(f'"{code}"' for code in _DATACENTER_MARKETS[key])
+    payload = em_get(
+        _DATACENTER,
+        params={
+            "reportName": _DATACENTER_REPORT,
+            "columns": _DATACENTER_COLUMNS,
+            "filter": f"(TRADE_MARKET_CODE in ({markets}))",
+            "pageNumber": page,
+            "pageSize": page_size,
+            "sortColumns": "PRIME_INFLOW",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+        },
+    )
+    result = (payload or {}).get("result") or {}
+    raw = result.get("data") or []
+    if not raw:
+        return empty(
+            "eastmoney",
+            "push2 资金流排名不可用，备用日频库同样无数据",
+            scope=key,
+            fallback_from="push2",
+            degraded="eod_datacenter",
+        )
+    rows = []
+    for r in raw:
+        main_net = to_float(r.get("PRIME_INFLOW"))
+        super_net = _datacenter_net(r, "SUPERDEAL_INFLOW", "SUPERDEAL_OUTFLOW")
+        large_net = _datacenter_net(r, "BIGDEAL_INFLOW", "BIGDEAL_OUTFLOW")
+        turnover = _datacenter_turnover(r)
+        rows.append(
+            {
+                "code": r.get("SECURITY_CODE"),
+                "name": r.get("SECURITY_NAME_ABBR"),
+                "price": to_float(r.get("CLOSE_PRICE")),
+                "change_pct": to_float(r.get("CHANGE_RATE")),
+                "main_net": main_net,
+                "main_net_pct": _datacenter_pct(main_net, turnover),
+                "super_large_net": super_net,
+                "super_large_pct": _datacenter_pct(super_net, turnover),
+                "large_net": large_net,
+                "large_pct": _datacenter_pct(large_net, turnover),
+                "medium_net": None,
+                "medium_pct": None,
+                "small_net": None,
+                "small_pct": None,
+            }
+        )
+    trade_date = str(raw[0].get("TRADE_DATE") or "")[:10] or None
+    out = frame(
+        rows,
+        "eastmoney",
+        source_url=_DATACENTER,
+        scope=key,
+        fallback_from="push2",
+        degraded="eod_datacenter",
+        data_as_of=trade_date,
+        note="push2 熔断，改用收盘日频排名：仅主力/超大单/大单口径，中单与小单为空",
+    )
+    out["data"] = {
+        "scope": key,
+        "total": to_int(result.get("count"), len(rows)),
+        "page": page,
+        "page_size": page_size,
+        "items": rows,
+    }
+    return out
+
+
 def _sina_board_flow(key: str, page: int, page_size: int) -> dict[str, Any]:
-    """Board flow ranking from Sina; stock scopes have no non-push2 equivalent."""
+    """Board flow ranking from Sina; stock scopes use the datacenter report instead."""
     raw = request(
         "sina",
         "GET",
