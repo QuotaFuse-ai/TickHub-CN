@@ -27,6 +27,7 @@ DEDUPE_TTL = 7 * 24 * 3600
 PAGE_LIMIT = 50
 
 Progress = Callable[[dict[str, Any]], None]
+StopCheck = Callable[[], bool]
 
 
 @dataclass
@@ -157,12 +158,14 @@ def crawl_announcements(
     limit: int = PAGE_LIMIT,
     concurrency: int | None = None,
     progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
 ) -> TaskResult:
     settings = get_settings()
     archive = get_archive()
     cache = get_cache()
     result = TaskResult(task="announcements")
     code_list = list(codes)
+    cancelled = False
 
     def one(code: str) -> tuple[str, list[dict[str, Any]], str]:
         return code, *_crawl_one(code, days=days, limit=limit)
@@ -170,6 +173,13 @@ def crawl_announcements(
     with ThreadPoolExecutor(max_workers=max(1, int(concurrency or settings.offline_crawler_concurrency or 1))) as pool:
         futures = {pool.submit(one, code): code for code in code_list}
         for future in as_completed(futures):
+            # Checked before consuming each result: work already in flight is
+            # bounded by the per-request timeout, pending ones are dropped.
+            if should_stop is not None and should_stop():
+                cancelled = True
+                for pending in futures:
+                    pending.cancel()
+                break
             code = futures[future]
             try:
                 _, rows, source = future.result()
@@ -180,6 +190,8 @@ def crawl_announcements(
                     "announcement crawl failed",
                     extra={"event": "crawl_code_failed", "source": "crawler", "detail": {"code": code}},
                 )
+                if progress:
+                    progress({"task": "announcements", "code": code, "fetched": 0, "inserted": 0, "failed": True})
                 continue
             result.fetched += len(rows)
             fresh = [r for r in rows if cache.dedupe(source, item_key(source, r, code, r.get("title"), r.get("publish_time")), DEDUPE_TTL)]
@@ -207,7 +219,10 @@ def crawl_announcements(
                 archive.insert_risks(events, source="computed")
             if progress:
                 progress({"task": "announcements", "code": code, "fetched": len(rows), "inserted": inserted})
-    if result.failed:
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
+    elif result.failed:
         result.status = "partial" if result.inserted or result.fetched else "failed"
     return result
 
@@ -223,22 +238,31 @@ def crawl_reports(
     page_size: int = 30,
     concurrency: int | None = None,
     progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
 ) -> TaskResult:
     settings = get_settings()
     archive = get_archive()
     cache = get_cache()
     result = TaskResult(task="reports")
     code_list = list(codes)
+    cancelled = False
 
     with ThreadPoolExecutor(max_workers=max(1, int(concurrency or settings.offline_crawler_concurrency or 1))) as pool:
         futures = {pool.submit(_crawl_reports_one, code, page_size=page_size): code for code in code_list}
         for future in as_completed(futures):
+            if should_stop is not None and should_stop():
+                cancelled = True
+                for pending in futures:
+                    pending.cancel()
+                break
             code = futures[future]
             try:
                 rows = future.result()
             except Exception as exc:
                 result.failed.append(code)
                 result.errors[code] = str(exc)[:300]
+                if progress:
+                    progress({"task": "reports", "code": code, "fetched": 0, "failed": True})
                 continue
             result.fetched += len(rows)
             fresh = [
@@ -253,17 +277,29 @@ def crawl_reports(
             result.skipped += len(rows) - len(fresh)
             result.inserted += archive.insert_reports(rows, source="eastmoney")
             if progress:
-                progress({"task": "reports", "code": code, "fetched": len(rows)})
-    if result.failed:
+                progress({"task": "reports", "code": code, "fetched": len(rows), "inserted": len(fresh)})
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
+    elif result.failed:
         result.status = "partial" if result.inserted or result.fetched else "failed"
     return result
 
 
-def crawl_risks(codes: Iterable[str], *, progress: Progress | None = None) -> TaskResult:
+def crawl_risks(
+    codes: Iterable[str],
+    *,
+    progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
+) -> TaskResult:
     """Derive risk events from announcements already sitting in the archive."""
     archive = get_archive()
     result = TaskResult(task="risks")
+    cancelled = False
     for code in codes:
+        if should_stop is not None and should_stop():
+            cancelled = True
+            break
         rows = archive.announcements(code=code, limit=200)
         events = []
         for row in rows:
@@ -286,6 +322,9 @@ def crawl_risks(codes: Iterable[str], *, progress: Progress | None = None) -> Ta
         result.inserted += archive.insert_risks(events, source="computed")
         if progress:
             progress({"task": "risks", "code": code, "events": len(events)})
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
     return result
 
 
@@ -297,8 +336,14 @@ def run_task(
     limit: int | None = None,
     concurrency: int | None = None,
     progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
 ) -> dict[str, Any]:
-    """Run one crawl task (``announcements`` / ``reports`` / ``risks`` / ``all``)."""
+    """Run one crawl task (``announcements`` / ``reports`` / ``risks`` / ``all``).
+
+    ``should_stop`` is polled between codes and between sub-tasks. A cancelled
+    run keeps whatever already landed in the archive, skips the remaining
+    sub-tasks, and reports ``status="cancelled"`` with ``detail["cancelled"]``.
+    """
     name = (task or "all").strip().lower()
     if name != "all" and name not in TASKS:
         raise ValueError(f"unknown crawl task: {task} (expected one of {', '.join(TASKS + ('all',))})")
@@ -308,10 +353,18 @@ def run_task(
     archive = get_archive()
     task_id = archive.start_task(name, {"codes": len(watchlist), "days": days})
     started = _dt.datetime.now()
+    plan = list(TASKS) if name == "all" else [name]
+    if progress:
+        progress({"phase": "start", "task": name, "codes": len(watchlist), "tasks": plan})
 
     results: list[TaskResult] = []
+    cancelled = False
+
+    def stop() -> bool:
+        return should_stop is not None and should_stop()
+
     try:
-        if name in ("announcements", "all"):
+        if "announcements" in plan and not stop():
             results.append(
                 crawl_announcements(
                     watchlist,
@@ -319,12 +372,18 @@ def run_task(
                     limit=limit or PAGE_LIMIT,
                     concurrency=concurrency,
                     progress=progress,
+                    should_stop=should_stop,
                 )
             )
-        if name in ("reports", "all"):
-            results.append(crawl_reports(watchlist, concurrency=concurrency, progress=progress))
-        if name in ("risks", "all"):
-            results.append(crawl_risks(watchlist, progress=progress))
+            cancelled = results[-1].status == "cancelled"
+        if "reports" in plan and not cancelled and not stop():
+            results.append(
+                crawl_reports(watchlist, concurrency=concurrency, progress=progress, should_stop=should_stop)
+            )
+            cancelled = results[-1].status == "cancelled"
+        if "risks" in plan and not cancelled and not stop():
+            results.append(crawl_risks(watchlist, progress=progress, should_stop=should_stop))
+            cancelled = results[-1].status == "cancelled"
     except Exception as exc:
         elapsed = (_dt.datetime.now() - started).total_seconds()
         archive.finish_task(task_id, status="failed", error=str(exc), detail={"elapsed_s": round(elapsed, 1)})
@@ -337,15 +396,20 @@ def run_task(
     fetched = sum(r.fetched for r in results)
     inserted = sum(r.inserted for r in results)
     failed = sorted({code for r in results for code in r.failed})
-    status = "ok"
-    if failed:
-        status = "partial" if fetched or inserted else "failed"
-    if not watchlist:
+    cancelled = cancelled or stop()
+    if cancelled:
+        status = "cancelled"
+    elif not watchlist:
         status = "empty"
+    elif failed:
+        status = "partial" if fetched or inserted else "failed"
+    else:
+        status = "ok"
     elapsed = (_dt.datetime.now() - started).total_seconds()
     detail = {
         "codes": len(watchlist),
         "elapsed_s": round(elapsed, 1),
+        "cancelled": cancelled,
         "tasks": [r.as_dict() for r in results],
     }
     archive.finish_task(
@@ -372,6 +436,7 @@ def run_task(
         "fetched": fetched,
         "inserted": inserted,
         "failed": failed,
+        "cancelled": cancelled,
         "elapsed_s": round(elapsed, 1),
         "tasks": [r.as_dict() for r in results],
     }

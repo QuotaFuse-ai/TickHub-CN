@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 import requests
 
 from tickhub_cn.core import http as http_mod
 from tickhub_cn.core.errors import TickHubError
-from tickhub_cn.proxy.pool import ProxyNode, ProxyPool
+from tickhub_cn.proxy.pool import (
+    ProxyNode,
+    ProxyPool,
+    add_proxy_node,
+    load_entries,
+    masked_entry,
+    remove_proxy_node,
+    set_proxy_node_enabled,
+)
 
 
 def _pool(*urls: str) -> ProxyPool:
@@ -172,3 +182,65 @@ def test_monitor_probes_every_interval_and_stops():
 
 def test_monitor_is_not_started_without_nodes():
     assert ProxyPool([]).start_monitor(0.05) is False
+
+
+def test_disabled_node_is_never_acquired(tmp_path, monkeypatch):
+    settings = SimpleNamespace(
+        proxy_pool_config_path=str(tmp_path / "proxy_pool.json"),
+        proxy_pool_enable=True,
+    )
+    monkeypatch.setattr("tickhub_cn.proxy.pool.get_settings", lambda: settings)
+    add_proxy_node({"url": "http://127.0.0.1:1"}, settings)
+    second = add_proxy_node({"url": "http://127.0.0.1:2"}, settings)
+    set_proxy_node_enabled(second["key"], False, settings)
+
+    pool = ProxyPool.from_settings()
+    assert [n.enabled for n in pool.nodes] == [True, False]
+
+    nodes = [ProxyNode(raw="http://127.0.0.1:1"), ProxyNode(raw="http://127.0.0.1:2", enabled=False)]
+    pool = ProxyPool(nodes)
+    assert pool.acquire() is nodes[0]
+    assert pool.acquire() is nodes[0], "a disabled node must never be handed out"
+
+
+def test_add_toggle_remove_round_trip_preserves_password(tmp_path):
+    settings = SimpleNamespace(proxy_pool_config_path=str(tmp_path / "nested" / "proxy_pool.json"))
+    added = add_proxy_node(
+        {"url": "10.0.0.1:8080", "username": "alice-long", "password": "p@ss word"},
+        settings,
+    )
+    assert added["url"] == "http://10.0.0.1:8080"
+    assert added["username"] == "al***"
+    assert "p@ss word" not in json.dumps(added)
+
+    stored = json.loads((tmp_path / "nested" / "proxy_pool.json").read_text(encoding="utf-8"))
+    assert stored["proxies"][0]["password"] == "p@ss word"
+    assert stored["proxies"][0]["username"] == "alice-long"
+
+    with pytest.raises(ValueError, match="already exists"):
+        add_proxy_node({"url": "http://10.0.0.1:8080", "username": "alice-long"}, settings)
+
+    toggled = set_proxy_node_enabled(added["key"], False, settings)
+    assert toggled is not None and toggled["enabled"] is False
+    entries = load_entries(settings)
+    assert entries[0]["password"] == "p@ss word", "toggling must not blank the stored password"
+
+    removed = remove_proxy_node(added["key"], settings)
+    assert removed is not None and removed["key"] == added["key"]
+    assert load_entries(settings) == []
+    assert remove_proxy_node(added["key"], settings) is None
+
+
+def test_masked_entry_hides_inline_credentials():
+    row = masked_entry("http://alice:secret@10.0.0.1:8080")
+    assert row["url"] == "http://10.0.0.1:8080"
+    assert row["username"] == ""
+    assert "alice" not in json.dumps(row)
+    assert "secret" not in json.dumps(row)
+
+
+def test_invalid_proxy_url_is_rejected(tmp_path):
+    settings = SimpleNamespace(proxy_pool_config_path=str(tmp_path / "proxy_pool.json"))
+    for bad in ("", "   ", "ftp://10.0.0.1:21", "http://10.0.0.1:not-a-port"):
+        with pytest.raises(ValueError):
+            add_proxy_node({"url": bad}, settings)

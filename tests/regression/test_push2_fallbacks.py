@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from tickhub_cn.core.errors import TickHubError
-from tickhub_cn.datasources import funds, market
+from tickhub_cn.datasources import funds, indices, market, quotes
 
 
 def _blocked(*_args: object, **_kwargs: object) -> object:
@@ -343,3 +343,183 @@ def test_sina_roster_pagination_out_of_range_is_empty(monkeypatch: pytest.Monkey
     assert out["ok"] is True
     assert out["data"] == []
     assert out["meta"]["note"] == "新浪板块列表不可用"
+
+
+# --------------------------------------------------------------------------- #
+# Board members
+# --------------------------------------------------------------------------- #
+
+BOARD_CONSTITUENT_ROW = {
+    "BOARD_CODE": "475",
+    "BOARD_CODE_BK": "BK0475",
+    "BOARD_NAME": "银行Ⅱ",
+    "SECURITY_CODE": "000001",
+    "SECUCODE": "000001.SZ",
+    "NEWEST_DATE": "2026-10-23 00:00:00",
+}
+
+TENCENT_QUOTE_ROW = {
+    "code": "000001",
+    "name": "平安银行",
+    "price": 11.2,
+    "change": -0.1,
+    "change_pct": -0.89,
+    "volume": 123456,
+    "amount": 98765.4,
+    "turnover_rate": 1.2,
+    "pe": 5.1,
+    "pb": 0.6,
+    "float_market_cap": 200000.0,
+    "total_market_cap": 210000.0,
+}
+
+
+def _board_datacenter(seen: dict[str, object], rows: list[dict[str, object]] | None = None):
+    def fake(url: str, params: dict[str, object] | None = None, **_kwargs: object) -> object:
+        seen.update({"url": url, **(params or {})})
+        return {
+            "success": True,
+            "result": {"count": 42, "data": rows if rows is not None else [BOARD_CONSTITUENT_ROW]},
+        }
+
+    return fake
+
+
+def test_board_members_fall_back_to_datacenter_membership(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(market, "_clist", _blocked)
+    monkeypatch.setattr(market, "em_get", _board_datacenter(seen))
+    monkeypatch.setattr(quotes, "tencent_quote", lambda *_a, **_k: {"data": [TENCENT_QUOTE_ROW]})
+
+    out = market.board_members("BK0475", page=1, page_size=50, _no_cache=True)
+
+    assert seen["reportName"] == "RPT_BOARD_CONSTITUENT"
+    # The report keys boards by the numeric suffix; "BK0475" filters to nothing.
+    assert seen["filter"] == '(BOARD_CODE="475")'
+    assert seen["pageNumber"] == 1 and seen["pageSize"] == 50
+    assert out["meta"]["fallback_from"] == "push2"
+    assert out["meta"]["degraded"] == "eod_constituent"
+    assert out["meta"]["data_as_of"] == "2026-10-23"
+    assert out["meta"]["amount_unit"] == "wan_yuan"
+    assert out["data"]["total"] == 42
+    item = out["data"]["items"][0]
+    assert item["code"] == "000001"
+    assert item["name"] == "平安银行"
+    assert item["price"] == 11.2
+    assert item["change_pct"] == -0.89
+    assert item["main_net_inflow"] is None and item["main_net_ratio"] is None
+
+
+def test_board_members_reject_a_substitute_board(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(market, "_clist", _blocked)
+    monkeypatch.setattr(
+        market,
+        "em_get",
+        _board_datacenter(seen, rows=[{**BOARD_CONSTITUENT_ROW, "BOARD_CODE_BK": "BK0476"}]),
+    )
+    monkeypatch.setattr(quotes, "tencent_quote", lambda *_a, **_k: {"data": []})
+
+    with pytest.raises(TickHubError) as exc:
+        market.board_members("BK0475", _no_cache=True)
+
+    assert exc.value.code == "QFSD-7001"
+
+
+def test_board_members_substitute_empty_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(market, "_clist", _blocked)
+    monkeypatch.setattr(
+        market,
+        "em_get",
+        lambda *_a, **_k: {"success": False, "message": "返回数据为空"},
+    )
+    monkeypatch.setattr(quotes, "tencent_quote", lambda *_a, **_k: pytest.fail("no members, no quotes"))
+
+    out = market.board_members("BK9999", _no_cache=True)
+
+    assert out["ok"] is True
+    assert out["data"] == []
+    assert out["meta"]["degraded"] == "eod_constituent"
+
+
+# --------------------------------------------------------------------------- #
+# Index roster
+# --------------------------------------------------------------------------- #
+
+
+def test_index_list_falls_back_to_tencent_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: dict[str, object] = {}
+
+    def fake_quote(codes: str) -> dict[str, object]:
+        asked["codes"] = codes
+        return {
+            "data": [
+                {"code": "000001", "name": "上证指数", "price": 3730.92, "change_pct": 0.63,
+                 "change": 23.4, "volume": 417791248, "amount": 5000000.0},
+                {"code": "000300", "name": "沪深300", "price": 4500.0, "change_pct": 0.5,
+                 "change": 22.0, "volume": 100000, "amount": 900000.0},
+            ]
+        }
+
+    monkeypatch.setattr(indices, "em_get", _blocked)
+    monkeypatch.setattr(quotes, "tencent_quote", fake_quote)
+
+    out = indices.index_list("sh", _no_cache=True)
+
+    assert "sh000001" in str(asked["codes"])
+    assert "sz399001" not in str(asked["codes"])
+    assert out["meta"]["source"] == "tencent"
+    assert out["meta"]["fallback_from"] == "eastmoney"
+    assert out["meta"]["degraded"] == "headline_roster"
+    assert "非全量列表" in out["meta"]["note"]
+    assert out["data"]["scope"] == "sh"
+    assert out["data"]["indices"][0]["code"] == "000001"
+
+
+def test_index_list_all_scope_spans_both_markets(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: dict[str, object] = {}
+
+    def fake_quote(codes: str) -> dict[str, object]:
+        asked["codes"] = codes
+        return {"data": [{"code": "000001", "name": "上证指数", "price": 1.0}]}
+
+    monkeypatch.setattr(indices, "em_get", _blocked)
+    monkeypatch.setattr(quotes, "tencent_quote", fake_quote)
+
+    indices.index_list("all", _no_cache=True)
+
+    assert "sh000001" in str(asked["codes"]) and "sz399001" in str(asked["codes"])
+
+
+def test_index_list_reports_an_empty_roster(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(indices, "em_get", _blocked)
+    monkeypatch.setattr(quotes, "tencent_quote", lambda *_a, **_k: {"data": []})
+
+    out = indices.index_list("sz", _no_cache=True)
+
+    assert out["ok"] is True
+    assert out["data"] == []
+    assert out["meta"]["degraded"] == "headline_roster"
+
+
+# --------------------------------------------------------------------------- #
+# Series with no zero-auth substitute
+# --------------------------------------------------------------------------- #
+
+
+def test_board_history_preserves_the_push2_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(market, "em_get", _blocked)
+
+    with pytest.raises(TickHubError) as exc:
+        market.board_history("BK0475", _no_cache=True)
+
+    assert exc.value.code == "QFSD-7001"
+
+
+def test_sw_industry_index_preserves_the_push2_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(indices, "em_get", _blocked)
+
+    with pytest.raises(TickHubError) as exc:
+        indices.sw_industry_index("801010", _no_cache=True)
+
+    assert exc.value.code == "QFSD-7001"

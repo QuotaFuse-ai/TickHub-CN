@@ -34,6 +34,9 @@ class ToolSpec:
     layer: str
     ttl: int | None
     params: tuple[str, ...] = field(default_factory=tuple)
+    # Read-only tools stay callable from the admin console when ADMIN_READONLY
+    # is on; a mutating tool must opt in here so the route can refuse it.
+    writes: bool = False
 
 
 REGISTRY: dict[str, ToolSpec] = {}
@@ -118,6 +121,7 @@ def tool(
     layer: str,
     ttl: str | int | None = "semi_static",
     cache_domain: str | None = None,
+    writes: bool = False,
 ):
     """Register a data function as an MCP tool with cache + projection."""
 
@@ -186,6 +190,7 @@ def tool(
             layer=layer,
             ttl=ttl_seconds,
             params=tuple(p.name for p in sig.parameters.values()),
+            writes=writes,
         )
         LAYERS.setdefault(layer, []).append(tool_name)
         return wrapper
@@ -220,6 +225,7 @@ def tool_catalog() -> list[dict[str, Any]]:
                 "description": spec.description,
                 "ttl_seconds": spec.ttl,
                 "params": list(spec.params),
+                "writes": spec.writes,
             }
         )
     return out

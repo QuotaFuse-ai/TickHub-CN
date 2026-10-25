@@ -25,7 +25,14 @@ from ..cache.redis_cache import get_cache
 from ..core.config import SECRET_HINTS, Settings, get_settings
 from ..core.http import HEALTH, read_health_state
 from ..logging.setup import audit, get_logger
-from ..proxy.pool import get_pool, reset_pool
+from ..proxy.pool import (
+    add_proxy_node,
+    describe_entries,
+    get_pool,
+    remove_proxy_node,
+    reset_pool,
+    set_proxy_node_enabled,
+)
 
 try:
     import toml
@@ -238,8 +245,14 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
     @app.get("/api/proxy")
     def proxy_list(request: Request) -> dict[str, Any]:
         auth(request)
-        pool = get_pool()
-        return {"ok": True, "enabled": bool(pool), "nodes": pool.masked()}
+        nodes = describe_entries(settings)
+        return {
+            "ok": True,
+            "enabled": bool(settings.proxy_pool_enable and any(n["enabled"] for n in nodes)),
+            "config_enabled": bool(settings.proxy_pool_enable),
+            "path": str(Path(settings.proxy_pool_config_path)),
+            "nodes": nodes,
+        }
 
     @app.post("/api/proxy/check")
     def proxy_check(request: Request) -> dict[str, Any]:
@@ -254,9 +267,53 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
         actor = auth(request)
         write_guard(actor)
         reset_pool()
-        pool = get_pool()
-        audit("proxy.reload", actor=actor, detail={"nodes": len(pool.masked())})
-        return {"ok": True, "nodes": pool.masked()}
+        nodes = describe_entries(settings)
+        audit("proxy.reload", actor=actor, detail={"nodes": len(nodes)})
+        return {"ok": True, "config_enabled": bool(settings.proxy_pool_enable), "nodes": nodes}
+
+    @app.post("/api/proxy/nodes")
+    def proxy_add(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        actor = auth(request)
+        write_guard(actor)
+        try:
+            node = add_proxy_node(payload, settings)
+        except ValueError as exc:
+            status = 409 if "already exists" in str(exc) else 422
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        reset_pool()
+        describe_entries(settings)
+        audit("proxy.add", actor=actor, detail={"node": node})
+        return {"ok": True, "node": node, "config_enabled": bool(settings.proxy_pool_enable)}
+
+    @app.post("/api/proxy/nodes/toggle")
+    def proxy_toggle(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        actor = auth(request)
+        write_guard(actor)
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key is required")
+        node = set_proxy_node_enabled(key, bool(payload.get("enabled", True)), settings)
+        if node is None:
+            raise HTTPException(status_code=404, detail="unknown proxy node")
+        reset_pool()
+        describe_entries(settings)
+        audit("proxy.toggle", actor=actor, detail={"node": node})
+        return {"ok": True, "node": node}
+
+    @app.post("/api/proxy/nodes/remove")
+    def proxy_remove(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        actor = auth(request)
+        write_guard(actor)
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="key is required")
+        node = remove_proxy_node(key, settings)
+        if node is None:
+            raise HTTPException(status_code=404, detail="unknown proxy node")
+        reset_pool()
+        describe_entries(settings)
+        audit("proxy.remove", actor=actor, detail={"node": node})
+        return {"ok": True, "node": node}
 
     # --------------------------------------------------------------- fieldmap
 
@@ -315,16 +372,21 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
         return {"ok": True, "count": len(REGISTRY), "tools": items}
 
     @app.post("/api/mcp/call")
-    def mcp_call(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    def mcp_call(request: Request, payload: dict[str, Any] = Body(default={})) -> Any:
         actor = auth(request)
-        write_guard(actor)
         from ..core.errors import TickHubError
-        from ..datasources import call_tool
+        from ..datasources import call_tool, resolve
 
         name = str(payload.get("tool") or payload.get("name") or "").strip()
         params = payload.get("params") or {}
         if not name or not isinstance(params, dict):
             raise HTTPException(status_code=422, detail="tool and params are required")
+        try:
+            spec = resolve(name)
+        except TickHubError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": exc.to_dict()})
+        if spec.writes:
+            write_guard(actor)
         try:
             result = call_tool(name, params)
         except TickHubError as exc:
@@ -342,16 +404,80 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
         return {"ok": True, **daemon_status()}
 
     @app.post("/api/crawler/run")
-    def crawler_run(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    def crawler_run(request: Request, payload: dict[str, Any] = Body(default={})) -> Any:
         actor = auth(request)
         write_guard(actor)
-        from ..crawler import run_task
+        from ..crawler import JobBusy, submit_job
 
-        task = str(payload.get("task") or "all")
-        codes = payload.get("codes")
-        result = run_task(task, codes=codes, days=int(payload.get("days") or 7))
-        audit("crawler.run", actor=actor, detail={"task": task, "status": result.get("status")})
-        return {"ok": True, **result}
+        try:
+            limit = payload.get("limit")
+            concurrency = payload.get("concurrency")
+            job = submit_job(
+                str(payload.get("task") or "all"),
+                codes=payload.get("codes"),
+                days=int(payload.get("days") or 7),
+                limit=int(limit) if limit not in (None, "") else None,
+                concurrency=int(concurrency) if concurrency not in (None, "") else None,
+            )
+        except JobBusy as busy:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "a crawl job is already running", "job": busy.job},
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)[:200])
+        audit("crawler.submit", actor=actor, detail={"task": job["task"], "job": job["id"]})
+        return {"ok": True, "job": job}
+
+    @app.get("/api/crawler/jobs")
+    def crawler_jobs(request: Request, limit: int = 20) -> dict[str, Any]:
+        auth(request)
+        from ..crawler import list_jobs, running_job
+
+        running = running_job()
+        return {"ok": True, "jobs": list_jobs(limit=limit), "running": (running or {}).get("id")}
+
+    @app.get("/api/crawler/jobs/{job_id}")
+    def crawler_job(request: Request, job_id: int) -> dict[str, Any]:
+        auth(request)
+        from ..crawler import JobNotFound, get_job
+
+        try:
+            job = get_job(job_id)
+        except JobNotFound:
+            raise HTTPException(status_code=404, detail="crawl job not found")
+        return {"ok": True, "job": job}
+
+    @app.post("/api/crawler/jobs/{job_id}/cancel")
+    def crawler_job_cancel(request: Request, job_id: int) -> dict[str, Any]:
+        actor = auth(request)
+        write_guard(actor)
+        from ..crawler import JobNotFound, cancel_job
+
+        try:
+            job = cancel_job(job_id)
+        except JobNotFound:
+            raise HTTPException(status_code=404, detail="crawl job not found")
+        audit("crawler.cancel", actor=actor, detail={"job": job_id})
+        return {"ok": True, "job": job}
+
+    @app.post("/api/crawler/jobs/{job_id}/retry")
+    def crawler_job_retry(request: Request, job_id: int) -> Any:
+        actor = auth(request)
+        write_guard(actor)
+        from ..crawler import JobBusy, JobNotFound, retry_job
+
+        try:
+            job = retry_job(job_id)
+        except JobNotFound:
+            raise HTTPException(status_code=404, detail="crawl job not found")
+        except JobBusy as busy:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "a crawl job is already running", "job": busy.job},
+            )
+        audit("crawler.retry", actor=actor, detail={"job": job["id"], "of": job_id})
+        return {"ok": True, "job": job}
 
     @app.get("/api/queue")
     def queue(request: Request) -> dict[str, Any]:

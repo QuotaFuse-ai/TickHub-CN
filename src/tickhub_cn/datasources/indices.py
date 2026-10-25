@@ -320,6 +320,50 @@ def is_trading_day(date: str = "") -> dict[str, Any]:
     return ok({"date": day, "is_trading_day": day in days}, "exchange")
 
 
+# Tencent quotes the major indices but publishes no full index roster (its board
+# ranking endpoints return empty), so the substitute covers headline indices only.
+_TENCENT_INDEX_ROSTER = {
+    "sh": ("sh000001", "sh000016", "sh000010", "sh000300", "sh000905", "sh000852", "sh000688", "sh000698"),
+    "sz": ("sz399001", "sz399006", "sz399005", "sz399330", "sz399303", "sz399673"),
+    "star": ("sh000688", "sh000698"),
+}
+
+
+def _tencent_index_list(key: str) -> dict[str, Any]:
+    """Headline index snapshot from Tencent when push2 cannot be reached."""
+    from .quotes import tencent_quote
+
+    symbols = list(_TENCENT_INDEX_ROSTER["sh" if key in {"all", "sh"} else key])
+    if key == "all":
+        symbols += list(_TENCENT_INDEX_ROSTER["sz"])
+    quoted = tencent_quote(",".join(symbols))
+    rows = [
+        {
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "price": row.get("price"),
+            "change_pct": row.get("change_pct"),
+            "change": row.get("change"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount"),
+        }
+        for row in quoted.get("data") or []
+    ]
+    if not rows:
+        return empty("tencent", "指数列表暂不可用", scope=key, fallback_from="eastmoney", degraded="headline_roster")
+    return ok(
+        {"scope": key, "indices": rows},
+        "tencent",
+        extra={
+            "count": len(rows),
+            "fallback_from": "eastmoney",
+            "degraded": "headline_roster",
+            "amount_unit": "wan_yuan",
+            "note": f"push2 不可达，已降级为腾讯 {len(rows)} 只主要指数快照，非全量列表",
+        },
+    )
+
+
 @tool(layer="index", ttl="semi_static")
 def index_list(scope: str = "all") -> dict[str, Any]:
     """List mainland indices by market (all / sh / sz / star)."""
@@ -332,20 +376,27 @@ def index_list(scope: str = "all") -> dict[str, Any]:
     }
     if key not in fs_map:
         raise TickHubError("QFSD-9001", "scope must be one of all/sh/sz/star")
-    payload = em_get(
-        "https://push2.eastmoney.com/api/qt/clist/get",
-        params={
-            "pn": 1,
-            "pz": 500,
-            "po": 1,
-            "np": 1,
-            "fltt": 2,
-            "invt": 2,
-            "fid": "f3",
-            "fs": fs_map[key],
-            "fields": "f12,f14,f2,f3,f4,f5,f6",
-        },
-    )
+    try:
+        payload = em_get(
+            "https://push2.eastmoney.com/api/qt/clist/get",
+            params={
+                "pn": 1,
+                "pz": 500,
+                "po": 1,
+                "np": 1,
+                "fltt": 2,
+                "invt": 2,
+                "fid": "f3",
+                "fs": fs_map[key],
+                "fields": "f12,f14,f2,f3,f4,f5,f6",
+            },
+        )
+    except TickHubError as exc:
+        try:
+            return _tencent_index_list(key)
+        except TickHubError:
+            # Keep the push2 error so the caller still gets the breaker's retry hint.
+            raise exc
     data = (payload or {}).get("data") or {}
     raw = data.get("diff") or []
     if isinstance(raw, dict):
@@ -363,7 +414,7 @@ def index_list(scope: str = "all") -> dict[str, Any]:
         for r in raw
     ]
     if not rows:
-        return empty("eastmoney", "index list unavailable", scope=key)
+        return _tencent_index_list(key)
     return ok({"scope": key, "indices": rows}, "eastmoney", extra={"count": len(rows)})
 
 
@@ -404,7 +455,9 @@ def sw_industry_index(code: str, days: int = 120) -> dict[str, Any]:
                     }
                 )
             return ok({"code": c, "name": data.get("name"), "klines": rows}, "eastmoney", extra={"count": len(rows)})
-    return empty("eastmoney", "申万指数历史暂不可用（代码或路由未发布）", code=c)
+    # Tencent, Sina and THS publish no 801xxx history, and Shenwan's API is not
+    # reachable without an account, so there is no non-push2 substitute.
+    return empty("eastmoney", "申万指数历史暂不可用：东财未发布该代码的 K 线，且无零鉴权替代源", code=c)
 
 
 @tool(layer="index", ttl="static")

@@ -111,6 +111,13 @@
   .kv { display: grid; grid-template-columns: minmax(140px, 240px) minmax(0, 1fr); gap: 2px 14px; font-size: 13px; }
   .kv dt { color: var(--muted); overflow-wrap: anywhere; }
   .kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .progress { height: 10px; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; background: var(--soft); }
+  .progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+  .chart { display: block; max-width: 100%; height: auto; margin: 4px 0 12px; }
+  .chart .svg-label { font-size: 12px; fill: var(--muted); }
+  .chart .svg-value { font-size: 12px; fill: var(--fg); font-variant-numeric: tabular-nums; }
+  .chart-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 6px 0; font-size: 12px; color: var(--muted); }
+  .chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
   @media (max-width: 760px) {
     .layout { grid-template-columns: 1fr; }
     nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -369,6 +376,57 @@ function pre(value) {
   return `<pre>${esc(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</pre>`;
 }
 
+/* --------------------------------------------------------------- charts */
+/* Hand-written SVG (DEC-017 keeps the console a single file with no CDN). */
+
+function clip(text, max = 24) {
+  const s = String(text);
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+function svgBars(items, opts = {}) {
+  const rows = items.filter((it) => Number.isFinite(Number(it.value)));
+  if (!rows.length) return "<p class='empty'>暂无可绘制的数据。</p>";
+  const width = 560, labelW = 150, valueW = 64, barH = 16, gap = 8, pad = 6;
+  const max = Math.max(1, ...rows.map((it) => Math.max(0, Number(it.value))));
+  const plotW = width - labelW - valueW - 12;
+  const height = pad * 2 + rows.length * (barH + gap) - gap;
+  const label = opts.title || "条形图";
+  const bars = rows.map((it, i) => {
+    const value = Math.max(0, Number(it.value));
+    const y = pad + i * (barH + gap);
+    const w = Math.max(2, (plotW * value) / max);
+    const fill = it.color || "var(--accent)";
+    const shown = opts.format ? opts.format(value) : String(Math.round(value));
+    return `<text class="svg-label" x="${labelW - 8}" y="${y + barH - 4}" text-anchor="end">${esc(clip(it.label))}</text>
+      <rect x="${labelW}" y="${y}" width="${w.toFixed(1)}" height="${barH}" rx="3" fill="${fill}"></rect>
+      <text class="svg-value" x="${(labelW + w + 6).toFixed(1)}" y="${y + barH - 4}">${esc(shown)}</text>`;
+  }).join("");
+  return `<svg class="chart" viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="${esc(label)}">
+    <title>${esc(label)}</title>${bars}</svg>`;
+}
+
+function svgStack(parts, opts = {}) {
+  const rows = parts.map((p) => ({ ...p, value: Math.max(0, Number(p.value) || 0) }));
+  const total = rows.reduce((sum, p) => sum + p.value, 0);
+  if (!total) return "<p class='empty'>还没有可统计的数据。</p>";
+  const width = 560, height = 24;
+  let x = 0;
+  const segs = rows.map((p) => {
+    const w = (width * p.value) / total;
+    const seg = `<rect x="${x.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${height}" fill="${p.color}">
+      <title>${esc(p.label)}：${p.value}</title></rect>`;
+    x += w;
+    return seg;
+  }).join("");
+  const legend = rows.map((p) =>
+    `<span><i style="background:${p.color}"></i>${esc(p.label)} ${p.value}</span>`).join("");
+  const label = opts.title || "占比图";
+  return `<div class="chart-legend">${legend}</div>
+    <svg class="chart" viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="${esc(label)}">
+      <title>${esc(label)}</title>${segs}</svg>`;
+}
+
 function writeButton(label, action, extra = "", cls = "primary") {
   const disabled = state.readonly ? "disabled" : "";
   return `<button type="button" class="${cls}" data-action="${esc(action)}" ${disabled}>${esc(label)}</button>${extra}`;
@@ -387,7 +445,7 @@ async function runAction(button, fn) {
   button.disabled = true;
   try { await fn(); }
   catch (exc) { toast(exc.message || String(exc), true); }
-  finally { button.textContent = original; button.disabled = Boolean(state.readonly); }
+  finally { button.textContent = original; button.disabled = Boolean(state.readonly) && button.dataset.allowReadonly !== "1"; }
 }
 
 /* -------------------------------------------------------------- search */
@@ -872,6 +930,9 @@ views.dashboard = async () => {
       </section>
     </div>
     <h3>各层工具数</h3>
+    ${svgBars(Object.entries(status.layers || {}).map(([layer, count]) => ({
+      label: layer, value: Array.isArray(count) ? count.length : Number(count) || 0,
+    })), { title: "各层工具数" })}
     ${table(Object.entries(status.layers || {}).map(([layer, toolNames]) =>
       ({ 层: layer, 数量: Array.isArray(toolNames) ? toolNames.length : toolNames })))}
     <h3>数据源健康（进程内计数）</h3>
@@ -914,6 +975,10 @@ views.cache = async () => {
       ["键数量", stats.keys ?? "—"],
       ["环境", stats.env],
     ])}
+    ${svgStack([
+      { label: "命中", value: stats.hits || 0, color: "var(--ok)" },
+      { label: "未命中", value: stats.misses || 0, color: "var(--warn)" },
+    ], { title: "缓存命中占比" })}
     <h3>失效缓存</h3>
     <div class="row">
       <label>前缀（留空 = 全量）<input id="cache-prefix" placeholder="例如 kline 或 qf:prod:cache" /></label>
@@ -926,10 +991,54 @@ views.cache = async () => {
 views.proxy = async () => {
   const data = await api("/api/proxy");
   const nodes = data.nodes || [];
+  const active = nodes.filter((n) => n.enabled).length;
+  const loaded = nodes.filter((n) => n.loaded).length;
+  const latency = nodes
+    .filter((n) => n.latency_ms !== null && n.latency_ms !== undefined && Number.isFinite(Number(n.latency_ms)))
+    .map((n) => ({
+      label: String(n.url).replace(/^https?:\/\//, ""),
+      value: Math.round(Number(n.latency_ms)),
+      color: n.healthy === false ? "var(--bad)" : "var(--accent)",
+    }))
+    .sort((a, b) => a.value - b.value);
+  const rows = nodes.map((n) => {
+    const health = !n.loaded ? "<span class='badge'>未加载</span>"
+      : n.healthy === false ? "<span class='badge bad'>异常</span>"
+      : "<span class='badge ok'>健康</span>";
+    return `<tr>
+      <td><code>${esc(n.url)}</code></td>
+      <td>${esc(n.username || "—")}</td>
+      <td>${n.has_password ? "已设置" : "—"}</td>
+      <td>${n.enabled ? "<span class='badge ok'>启用</span>" : "<span class='badge warn'>停用</span>"}</td>
+      <td>${health}</td>
+      <td>${n.failures || 0}</td>
+      <td>${n.latency_ms === null || n.latency_ms === undefined ? "—" : Math.round(n.latency_ms) + " ms"}</td>
+      <td>${writeButton(n.enabled ? "停用" : "启用", "proxy-toggle",
+        ` data-key="${esc(n.key)}" data-enabled="${n.enabled ? "0" : "1"}"`)}
+        ${writeButton("删除", "proxy-remove", ` data-key="${esc(n.key)}"`, "danger")}</td>
+    </tr>`;
+  }).join("");
   return `
     <h2>代理池</h2>
-    <p class="sub">节点凭据始终脱敏展示；<code>check</code> 会真实探测，<code>reload</code> 重新读取配置。</p>
-    ${cards([["启用", data.enabled ? "是" : "否"], ["节点数", nodes.length]])}
+    <p class="sub">
+      节点凭据始终脱敏展示；增删与启停会写回 <code>${esc(data.path)}</code> 并立即重载。
+    </p>
+    ${data.config_enabled ? "" :
+      `<p class="sub" style="color:var(--warn)">PROXY_POOL_ENABLE=false：节点会保存到文件，但重启或重载后不会进入运行时池。</p>`}
+    ${cards([
+      ["配置开关", data.config_enabled ? "开" : "关"],
+      ["启用节点", `${active} / ${nodes.length}`],
+      ["已加载", loaded],
+      ["生效", data.enabled ? "是" : "否"],
+    ])}
+    <h3>节点延迟</h3>
+    ${svgBars(latency, { title: "节点延迟", format: (v) => `${v} ms` })}
+    <div class="row">
+      <label>地址<input id="proxy-url" placeholder="http://host:port 或 host:port" /></label>
+      <label>用户名<input id="proxy-user" placeholder="可选" autocomplete="off" /></label>
+      <label>密码<input id="proxy-pass" type="password" placeholder="可选" autocomplete="new-password" /></label>
+      ${writeButton("添加节点", "proxy-add")}
+    </div>
     <div class="row">
       ${writeButton("全部探测", "proxy-check")}
       ${writeButton("重新加载", "proxy-reload")}
@@ -937,7 +1046,9 @@ views.proxy = async () => {
     </div>
     <div id="action-result"></div>
     <h3>节点</h3>
-    ${table(nodes)}`;
+    ${nodes.length ? `<table><thead><tr><th>地址</th><th>用户名</th><th>密码</th><th>状态</th>
+      <th>健康</th><th>连续失败</th><th>延迟</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody></table>` : "<p class='empty'>还没有节点，先在上方添加一个。</p>"}`;
 };
 
 views.fieldmap = async () => {
@@ -985,11 +1096,12 @@ views.mcp = async () => {
     </div>
     <div id="mcp-tools">${table(rows, ["name", "layer", "params", "ttl", "description"])}</div>
     <h3>调用工具</h3>
+    ${state.readonly ? `<p class="sub">只读模式：只读工具照常可调，写入类工具会被服务端拒绝。</p>` : ""}
     <div class="row">
       <label>工具<input id="call-tool" list="tool-names" placeholder="get_kline" style="width:200px;" />
         <datalist id="tool-names">${(state.tools.tools || []).map((t) => `<option value="${esc(t.name)}"></option>`).join("")}</datalist>
       </label>
-      ${writeButton("调用", "mcp-call")}
+      <button type="button" class="primary" data-action="mcp-call" data-allow-readonly="1">调用</button>
     </div>
     <label style="display:block;">参数（JSON 对象）
       <textarea id="call-params" style="min-height:110px;" spellcheck="false">{"code": "600000"}</textarea>
@@ -1008,23 +1120,164 @@ views.data = async () => `
   </div>
   <div id="action-result"></div>`;
 
+const STATUS_LABELS = {
+  queued: ["排队中", "warn"],
+  running: ["运行中", "ok"],
+  ok: ["完成", "ok"],
+  partial: ["部分成功", "warn"],
+  failed: ["失败", "bad"],
+  cancelled: ["已取消", "warn"],
+  empty: ["无数据", "warn"],
+};
+
+function statusBadge(status) {
+  const [label, cls] = STATUS_LABELS[status] || [status || "未知", ""];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+
+function jobProgress(job) {
+  const progress = job.progress || {};
+  const total = Number(progress.total) || 0;
+  const done = Number(progress.done) || 0;
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const parts = [`已处理 ${done}${total ? ` / ${total}` : ""} 步`];
+  if (progress.current) parts.push(`当前 ${esc(progress.current)}`);
+  if (progress.failed) parts.push(`失败 ${Number(progress.failed)} 个`);
+  return `<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+      aria-valuenow="${percent}" aria-label="任务进度">
+      <div class="progress-fill" style="width:${percent}%"></div>
+    </div>
+    <p class="muted" style="margin:6px 0 0;">${percent}% · ${parts.join(" · ")}</p>`;
+}
+
+function jobPanel(job) {
+  if (!job) return "<p class='empty'>暂无任务。提交一次抓取后，这里会实时显示进度。</p>";
+  const active = job.status === "queued" || job.status === "running";
+  const buttons = [];
+  if (active && !state.readonly) {
+    buttons.push(`<button type="button" class="danger" data-action="crawler-cancel" data-job="${Number(job.id)}">取消</button>`);
+  }
+  if (!active && !state.readonly) {
+    buttons.push(`<button type="button" data-action="crawler-retry" data-job="${Number(job.id)}">重试</button>`);
+  }
+  const result = job.result;
+  return `
+    <h3>任务 #${Number(job.id)} ${statusBadge(job.status)}</h3>
+    ${jobProgress(job)}
+    ${kv([
+      ["任务", job.task],
+      ["代码数", job.codes || "—"],
+      ["窗口天数", job.days],
+      ["已用时长", fmtDuration(job.elapsed_s)],
+      ["提交时间", job.created_at],
+      ["结束时间", job.finished_at || "—"],
+      ["取消请求", job.cancel_requested ? "已发出" : "—"],
+      ["抓取 / 写入", result ? `${result.fetched} / ${result.inserted}` : "—"],
+      ["失败代码", result && result.failed && result.failed.length ? result.failed.join(", ") : "—"],
+    ])}
+    ${buttons.length ? `<div class="row">${buttons.join("")}</div>` : ""}
+    ${job.error ? `<p class="err">${esc(job.error)}</p>` : ""}
+    ${result ? `<details><summary>任务结果</summary>${pre(result)}</details>` : ""}`;
+}
+
+function jobTable(jobs) {
+  if (!jobs.length) return "<p class='empty'>还没有任务记录。</p>";
+  const rows = jobs.map((job) => ({
+    "#": job.id,
+    任务: job.task,
+    状态: job.status,
+    进度: `${Number((job.progress || {}).percent) || 0}%`,
+    抓取: job.result ? job.result.fetched : "—",
+    写入: job.result ? job.result.inserted : "—",
+    耗时: fmtDuration(job.elapsed_s),
+    提交: job.created_at,
+  }));
+  const throughput = jobs
+    .filter((job) => job.result)
+    .slice()
+    .reverse()
+    .map((job) => ({
+      label: `#${job.id} ${job.task}`,
+      value: Number(job.result.fetched) || 0,
+      color: job.status === "ok" ? "var(--ok)" : job.status === "partial" ? "var(--warn)" : "var(--bad)",
+    }));
+  return table(rows, null, { sort: false, note: "顺序由服务端决定：最新在前。" })
+    + `<h3>最近任务抓取量</h3>${svgBars(throughput, { title: "最近任务抓取量（条）" })}`;
+}
+
+function paintCrawlerJobs(jobs) {
+  const box = $("#crawler-job");
+  const list = $("#crawler-job-list");
+  if (!box || !list) return;
+  const current = jobs.find((job) => job.status === "queued" || job.status === "running") || jobs[0] || null;
+  const key = current
+    ? [current.id, current.status, (current.progress || {}).done, (current.progress || {}).total,
+       (current.progress || {}).current, current.cancel_requested].join("|")
+    : "empty";
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.innerHTML = jobPanel(current);
+  }
+  const listKey = jobs.map((job) => `${job.id}:${job.status}:${(job.progress || {}).percent}`).join(",");
+  if (list.dataset.key !== listKey) {
+    list.dataset.key = listKey;
+    list.innerHTML = jobTable(jobs);
+  }
+}
+
+let crawlerTimer = null;
+
+function stopCrawlerPoll() {
+  if (crawlerTimer) {
+    clearInterval(crawlerTimer);
+    crawlerTimer = null;
+  }
+}
+
+function startCrawlerPoll() {
+  stopCrawlerPoll();
+  crawlerTimer = setInterval(refreshCrawlerJobs, 1500);
+}
+
+async function refreshCrawlerJobs() {
+  if (currentRoute() !== "crawler") {
+    stopCrawlerPoll();
+    return;
+  }
+  let data;
+  try {
+    data = await api("/api/crawler/jobs?limit=10");
+  } catch (exc) {
+    stopCrawlerPoll();
+    return;
+  }
+  const jobs = data.jobs || [];
+  paintCrawlerJobs(jobs);
+  if (!jobs.some((job) => job.status === "queued" || job.status === "running")) stopCrawlerPoll();
+}
+
 views.crawler = async () => {
-  const [data, queueData] = await Promise.all([api("/api/crawler/status"), api("/api/queue")]);
+  const [data, queueData, jobData] = await Promise.all([
+    api("/api/crawler/status"), api("/api/queue"), api("/api/crawler/jobs?limit=10"),
+  ]);
   const queue = queueData.queue || {};
+  const jobs = jobData.jobs || [];
   return `
     <h2>抓取任务</h2>
-    <p class="sub">离线采集守护进程由 <code>th-cn crawler start</code> 管理；此处只读取状态并触发单次任务。</p>
+    <p class="sub">离线采集守护进程由 <code>th-cn crawler start</code> 管理；这里提交的任务在后台线程执行，
+      页面按秒轮询进度，可随时取消（已落库的数据保留），结束后可一键重试。</p>
     ${cards([
       ["启用", data.enabled ? "是" : "否"],
       ["Cron", data.cron],
       ["并发", data.concurrency],
       ["关注范围", data.watchlist],
+      ["运行中", jobData.running ? `#${jobData.running}` : "—"],
     ])}
     <h3>守护进程</h3>
     ${kv(Object.entries(data.daemon || {}))}
     <h3>队列长度</h3>
     ${kv(Object.entries(queue))}
-    <h3>触发一次任务</h3>
+    <h3>提交任务</h3>
     <div class="row">
       <label>任务
         <select id="crawler-task">
@@ -1036,9 +1289,13 @@ views.crawler = async () => {
       </label>
       <label>代码（可选，逗号分隔）<input id="crawler-codes" placeholder="600000,000001" style="width:200px;" /></label>
       <label>天数<input id="crawler-days" type="number" min="1" max="90" value="7" style="width:90px;" /></label>
-      ${writeButton("运行", "crawler-run")}
+      ${writeButton("提交", "crawler-run")}
     </div>
     <div id="action-result"></div>
+    <div id="crawler-job" data-key="empty">${jobPanel(jobs.find((job) =>
+      job.status === "queued" || job.status === "running") || jobs[0] || null)}</div>
+    <h3>任务历史</h3>
+    <div id="crawler-job-list">${jobTable(jobs)}</div>
     <h3>归档统计</h3>
     ${kv(Object.entries(data.archive || {}))}`;
 };
@@ -1116,6 +1373,43 @@ async function handleAction(action, button) {
       const data = await post(action === "proxy-check" ? "/api/proxy/check" : "/api/proxy/reload");
       show(table(data.nodes || []));
       toast(action === "proxy-check" ? "探测完成" : "代理池已重新加载");
+      if (action === "proxy-reload") await renderRoute(true);
+    });
+  }
+
+  if (action === "proxy-add") {
+    if (!guardReadonly()) return;
+    const url = (($("#proxy-url") || {}).value || "").trim();
+    if (!url) { toast("请填写代理地址", true); return; }
+    const body = {
+      url,
+      username: (($("#proxy-user") || {}).value || "").trim(),
+      password: (($("#proxy-pass") || {}).value || ""),
+    };
+    return runAction(button, async () => {
+      const data = await post("/api/proxy/nodes", body);
+      toast(`已添加节点 ${data.node.url}`);
+      await renderRoute(true);
+    });
+  }
+
+  if (action === "proxy-toggle") {
+    if (!guardReadonly()) return;
+    const enabled = button.dataset.enabled === "1";
+    return runAction(button, async () => {
+      await post("/api/proxy/nodes/toggle", { key: button.dataset.key, enabled });
+      toast(enabled ? "节点已启用" : "节点已停用");
+      await renderRoute(true);
+    });
+  }
+
+  if (action === "proxy-remove") {
+    if (!guardReadonly()) return;
+    if (!window.confirm("确认删除该代理节点？删除会写回配置文件。")) return;
+    return runAction(button, async () => {
+      await post("/api/proxy/nodes/remove", { key: button.dataset.key });
+      toast("节点已删除");
+      await renderRoute(true);
     });
   }
 
@@ -1153,7 +1447,6 @@ async function handleAction(action, button) {
   }
 
   if (action === "mcp-call") {
-    if (!guardReadonly()) return;
     return runAction(button, async () => {
       const tool = $("#call-tool").value.trim();
       let params;
@@ -1199,8 +1492,23 @@ async function handleAction(action, button) {
         codes: ($("#crawler-codes").value || "").split(/[,\s]+/).filter(Boolean),
       };
       const data = await post("/api/crawler/run", body);
-      show(pre(data));
-      toast("任务已执行");
+      toast(`已提交任务 #${data.job.id}，进度会在下方实时刷新`);
+      await refreshCrawlerJobs();
+      startCrawlerPoll();
+    });
+  }
+
+  if (action === "crawler-cancel" || action === "crawler-retry") {
+    if (!guardReadonly()) return;
+    const jobId = Number(button.dataset.job);
+    return runAction(button, async () => {
+      const suffix = action === "crawler-cancel" ? "cancel" : "retry";
+      const data = await post(`/api/crawler/jobs/${jobId}/${suffix}`);
+      toast(action === "crawler-cancel"
+        ? `任务 #${jobId} 已请求取消，已落库的数据会保留`
+        : `已重新提交任务 #${data.job.id}`);
+      await refreshCrawlerJobs();
+      startCrawlerPoll();
     });
   }
 
@@ -1265,7 +1573,9 @@ async function renderRoute(force = false) {
   if (force) view.innerHTML = "<p class='muted'>加载中…</p>";
   try {
     view.innerHTML = await views[route]();
+    if (route === "crawler") startCrawlerPoll(); else stopCrawlerPoll();
   } catch (exc) {
+    stopCrawlerPoll();
     view.innerHTML = `<h2>加载失败</h2><p class="err">${esc(exc.message || String(exc))}</p>
       ${codeHelpHtml(exc.message)}<div class="row"><button type="button" class="primary" data-action="refresh-view">重试</button></div>`;
   } finally {

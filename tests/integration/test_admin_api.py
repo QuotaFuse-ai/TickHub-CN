@@ -78,15 +78,104 @@ def test_admin_requires_token_on_every_route() -> None:
     assert open_client.get("/api/status").json()["auth"] == "loopback"
 
 
-def test_admin_readonly_blocks_every_write() -> None:
+def test_admin_readonly_blocks_writes_but_lets_read_tools_through() -> None:
     client = _client(readonly=True)
     assert client.get("/api/status", headers=_headers()).json()["readonly"] is True
 
     assert client.post("/api/cache/flush", headers=_headers(), json={}).status_code == 403
     assert client.post("/api/crawler/run", headers=_headers(), json={"task": "risks"}).status_code == 403
-    assert client.post("/api/mcp/call", headers=_headers(), json={"tool": "apply_adjust"}).status_code == 403
     assert client.put("/api/fieldmap", headers=_headers(), json={"content": ""}).status_code == 403
     assert client.post("/api/proxy/reload", headers=_headers()).status_code == 403
+    assert client.post("/api/proxy/nodes", headers=_headers(), json={"url": "http://10.0.0.1:1"}).status_code == 403
+    assert client.post("/api/proxy/nodes/toggle", headers=_headers(), json={"key": "x"}).status_code == 403
+    assert client.post("/api/proxy/nodes/remove", headers=_headers(), json={"key": "x"}).status_code == 403
+
+    called = client.post(
+        "/api/mcp/call",
+        headers=_headers(),
+        json={"tool": "apply_adjust", "params": {"code": "600000", "closes": "10,11", "factors": "2,2"}},
+    )
+    assert called.status_code == 200, called.text
+    assert called.json()["payload"]["data"] == {"code": "600000", "adjusted": [20.0, 22.0]}
+
+    tools = client.get("/api/mcp/tools", headers=_headers()).json()
+    flags = {t["name"]: t["writes"] for t in tools["tools"]}
+    assert flags["apply_adjust"] is False
+    assert not any(flags.values())
+
+    # A tool that declares itself a writer still hits the read-only guard.
+    from tickhub_cn.datasources import REGISTRY
+    from tickhub_cn.datasources.base import ToolSpec
+
+    REGISTRY["_readonly_probe"] = ToolSpec(
+        name="_readonly_probe", func=lambda **_: {"ok": True}, description="probe", layer="misc",
+        ttl=None, params=(), writes=True,
+    )
+    try:
+        denied = client.post("/api/mcp/call", headers=_headers(), json={"tool": "_readonly_probe"})
+        assert denied.status_code == 403
+    finally:
+        REGISTRY.pop("_readonly_probe", None)
+
+
+def test_admin_proxy_nodes_round_trip_masked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = tmp_path / "proxy_pool.json"
+    monkeypatch.setenv("PROXY_POOL_CONFIG_PATH", str(config))
+    monkeypatch.setenv("PROXY_POOL_ENABLE", "true")
+    from tickhub_cn.core.config import reload_settings
+    from tickhub_cn.proxy.pool import reset_pool
+
+    reload_settings()
+    reset_pool()
+    try:
+        client = _client()
+        added = client.post(
+            "/api/proxy/nodes",
+            headers=_headers(),
+            json={"url": "10.0.0.1:8080", "username": "alice-long", "password": "super-secret"},
+        )
+        assert added.status_code == 200, added.text
+        assert "super-secret" not in added.text
+        node = added.json()["node"]
+        assert node["url"] == "http://10.0.0.1:8080"
+        assert node["username"] == "al***"
+        assert node["enabled"] is True
+
+        listing = client.get("/api/proxy", headers=_headers()).json()
+        assert listing["enabled"] is True
+        assert [n["key"] for n in listing["nodes"]] == [node["key"]]
+        assert "super-secret" not in json.dumps(listing)
+
+        duplicate = client.post(
+            "/api/proxy/nodes",
+            headers=_headers(),
+            json={"url": "http://10.0.0.1:8080", "username": "alice-long"},
+        )
+        assert duplicate.status_code == 409
+
+        toggled = client.post(
+            "/api/proxy/nodes/toggle", headers=_headers(), json={"key": node["key"], "enabled": False}
+        )
+        assert toggled.status_code == 200
+        assert toggled.json()["node"]["enabled"] is False
+        stored = json.loads(config.read_text(encoding="utf-8"))
+        assert stored["proxies"][0]["password"] == "super-secret"
+        assert stored["proxies"][0]["enabled"] is False
+
+        removed = client.post("/api/proxy/nodes/remove", headers=_headers(), json={"key": node["key"]})
+        assert removed.status_code == 200
+        assert client.get("/api/proxy", headers=_headers()).json()["nodes"] == []
+        assert client.post("/api/proxy/nodes/remove", headers=_headers(), json={"key": node["key"]}).status_code == 404
+
+        audit_text = Path("./logs/admin_audit.jsonl").read_text(encoding="utf-8")
+        for action in ("proxy.add", "proxy.toggle", "proxy.remove"):
+            assert action in audit_text
+        assert "super-secret" not in audit_text
+    finally:
+        reset_pool()
+        monkeypatch.delenv("PROXY_POOL_CONFIG_PATH", raising=False)
+        monkeypatch.delenv("PROXY_POOL_ENABLE", raising=False)
+        reload_settings()
 
 
 def test_admin_writes_are_audited_and_fieldmap_is_validated() -> None:

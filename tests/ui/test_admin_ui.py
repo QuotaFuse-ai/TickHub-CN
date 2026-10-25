@@ -31,6 +31,8 @@ ENDPOINTS = (
     "/api/mcp/call",
     "/api/crawler/status",
     "/api/crawler/run",
+    "/api/crawler/jobs?limit=10",
+    "/api/crawler/jobs/${jobId}/${suffix}",
     "/api/queue",
     "/api/crosscheck",
     "/api/risk",
@@ -93,6 +95,21 @@ def test_write_actions_are_guarded_by_readonly() -> None:
     html = ADMIN_PAGE.read_text(encoding="utf-8")
     assert "ADMIN_READONLY" in html
     assert "guardReadonly" in html
+    # The MCP debug call must stay usable in read-only mode; the server refuses
+    # only tools that declare themselves writers.
+    assert 'data-action="mcp-call" data-allow-readonly="1"' in html
+    assert "dataset.allowReadonly" in html
+
+
+def test_page_renders_charts_as_inline_svg() -> None:
+    html = ADMIN_PAGE.read_text(encoding="utf-8")
+    assert "function svgBars(" in html
+    assert "function svgStack(" in html
+    for caller in ("svgBars(Object.entries(status.layers", "svgStack([", "svgBars(latency", "svgBars(throughput"):
+        assert caller in html, caller
+    # Zero CDN (DEC-017): no external script/style/image URL anywhere.
+    assert "https://" not in html
+    assert re.search(r"<(script|link|img)\b[^>]*\b(src|href)=", html) is None
 
 
 def _script(html: str) -> str:

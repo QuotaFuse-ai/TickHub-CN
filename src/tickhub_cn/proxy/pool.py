@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 from ..core.config import get_settings
 from ..logging.setup import get_logger
@@ -22,12 +24,32 @@ def _mask(value: str) -> str:
     return value[:2] + MASK if len(value) > 4 else MASK
 
 
+def _node_key(raw: str, username: str, headers: dict[str, str] | None = None) -> str:
+    """Opaque, credential-free handle used by the console to address a node."""
+    basis = "\x1f".join([raw, username, json.dumps(headers or {}, sort_keys=True, ensure_ascii=False)])
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_url(raw: str) -> str:
+    """Drop any userinfo; keep host and port so operators can identify a node."""
+    parsed = urlparse(raw)
+    if not parsed.hostname:
+        return raw.split("@")[-1] if "@" in raw else raw
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{parsed.hostname}:{port}" if port else str(parsed.hostname)
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
 @dataclass
 class ProxyNode:
     raw: str
     username: str = ""
     password: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
     healthy: bool = True
     failures: int = 0
     latency_ms: float | None = None
@@ -37,6 +59,10 @@ class ProxyNode:
     def id(self) -> str:
         host = urlparse(self.raw).netloc or self.raw
         return f"{host}|{_mask(self.username)}"
+
+    @property
+    def key(self) -> str:
+        return _node_key(self.raw, self.username, self.headers)
 
     def requests_url(self) -> str:
         if not self.username:
@@ -50,14 +76,14 @@ class ProxyNode:
         return {"http": url, "https": url}
 
     def masked(self) -> dict[str, Any]:
-        parsed = urlparse(self.raw)
-        safe = urlunparse(parsed._replace(netloc=parsed.hostname or ""))
         return {
             "id": self.id,
-            "url": safe,
-            "username": self.username,
+            "key": self.key,
+            "url": _safe_url(self.raw),
+            "username": _mask(self.username),
             "has_password": bool(self.password),
             "headers": {k: MASK for k in self.headers},
+            "enabled": self.enabled,
             "healthy": self.healthy,
             "failures": self.failures,
             "latency_ms": self.latency_ms,
@@ -103,7 +129,7 @@ class ProxyPool:
             for _ in range(n):
                 node = self.nodes[self._idx % n]
                 self._idx += 1
-                if not node.healthy:
+                if not node.enabled or not node.healthy:
                     continue
                 if node.id in exclude:
                     if fallback is None:
@@ -190,6 +216,8 @@ class ProxyPool:
             for node in list(self.nodes):
                 if self._monitor_stop.is_set():
                     return
+                if not node.enabled:
+                    continue
                 self.check(node)
                 checked += 1
             log.info("proxy pool checked", extra={"detail": {"nodes": checked}})
@@ -210,10 +238,157 @@ def _to_node(entry: Any) -> ProxyNode:
         return ProxyNode(raw=entry.strip())
     return ProxyNode(
         raw=str(entry.get("url", "")).strip(),
-        username=str(entry.get("username", "")),
-        password=str(entry.get("password", "")),
+        username=str(entry.get("username", "") or ""),
+        password=str(entry.get("password", "") or ""),
         headers={str(k): str(v) for k, v in (entry.get("headers") or {}).items()},
+        enabled=bool(entry.get("enabled", not entry.get("disabled", False))),
     )
+
+
+def _entry_dict(entry: Any) -> dict[str, Any]:
+    """Tolerant normalisation used for reads; never raises on a legacy entry."""
+    if isinstance(entry, str):
+        return {"url": entry.strip(), "username": "", "password": "", "headers": {}, "enabled": True}
+    if not isinstance(entry, dict):
+        return {"url": "", "username": "", "password": "", "headers": {}, "enabled": True}
+    headers = entry.get("headers") or {}
+    if not isinstance(headers, dict):
+        headers = {}
+    return {
+        "url": str(entry.get("url", "") or "").strip(),
+        "username": str(entry.get("username", "") or ""),
+        "password": str(entry.get("password", "") or ""),
+        "headers": {str(k): str(v) for k, v in headers.items()},
+        "enabled": bool(entry.get("enabled", not entry.get("disabled", False))),
+    }
+
+
+def _entry_key(entry: Any) -> str:
+    d = _entry_dict(entry)
+    return _node_key(d["url"], d["username"], d["headers"])
+
+
+def masked_entry(entry: Any) -> dict[str, Any]:
+    d = _entry_dict(entry)
+    return {
+        "key": _node_key(d["url"], d["username"], d["headers"]),
+        "url": _safe_url(d["url"]),
+        "username": _mask(d["username"]),
+        "has_password": bool(d["password"]),
+        "headers": {k: MASK for k in d["headers"]},
+        "enabled": d["enabled"],
+    }
+
+
+def normalize_entry(entry: Any) -> dict[str, Any]:
+    """Validate a console-supplied node and split inline credentials out."""
+    d = _entry_dict(entry)
+    if d["url"] and "://" not in d["url"]:
+        d["url"] = "http://" + d["url"]
+    parsed = urlparse(d["url"])
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("proxy url must be http(s)://host[:port]")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("proxy url has an invalid port") from exc
+    if parsed.username:
+        if not d["username"]:
+            d["username"] = unquote(parsed.username)
+            d["password"] = unquote(parsed.password or "")
+        netloc = f"{parsed.hostname}:{port}" if port else str(parsed.hostname)
+        d["url"] = urlunparse(parsed._replace(netloc=netloc))
+    if not d["url"]:
+        raise ValueError("proxy url is required")
+    return d
+
+
+def write_entries(entries: list[Any], settings: Any | None = None) -> Path:
+    """Atomically persist the node list in the format ``load_entries`` reads."""
+    settings = settings or get_settings()
+    path = Path(settings.proxy_pool_config_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(
+        json.dumps({"proxies": list(entries)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return path
+
+
+def add_proxy_node(entry: Any, settings: Any | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
+    node = normalize_entry(entry)
+    entries = list(load_entries(settings))
+    key = _node_key(node["url"], node["username"], node["headers"])
+    if any(_entry_key(e) == key for e in entries):
+        raise ValueError("proxy node already exists")
+    entries.append(node)
+    write_entries(entries, settings)
+    return masked_entry(node)
+
+
+def remove_proxy_node(key: str, settings: Any | None = None) -> dict[str, Any] | None:
+    settings = settings or get_settings()
+    kept: list[Any] = []
+    removed: dict[str, Any] | None = None
+    for entry in load_entries(settings):
+        if removed is None and _entry_key(entry) == key:
+            removed = masked_entry(entry)
+            continue
+        kept.append(entry)
+    if removed is None:
+        return None
+    write_entries(kept, settings)
+    return removed
+
+
+def set_proxy_node_enabled(key: str, enabled: bool, settings: Any | None = None) -> dict[str, Any] | None:
+    settings = settings or get_settings()
+    entries: list[Any] = []
+    updated: dict[str, Any] | None = None
+    for entry in load_entries(settings):
+        if updated is None and _entry_key(entry) == key:
+            d = _entry_dict(entry)
+            d["enabled"] = bool(enabled)
+            entries.append(d)
+            updated = masked_entry(d)
+        else:
+            entries.append(entry)
+    if updated is None:
+        return None
+    write_entries(entries, settings)
+    return updated
+
+
+def describe_entries(settings: Any | None = None) -> list[dict[str, Any]]:
+    """Merge persisted nodes with live health, including nodes the pool skipped.
+
+    ``PROXY_POOL_ENABLE=false`` builds an empty runtime pool, but the file may
+    still hold nodes; the console must show them (``loaded: false``) or they
+    would look deleted.
+    """
+    settings = settings or get_settings()
+    runtime = {node.key: node for node in get_pool().nodes}
+    out: list[dict[str, Any]] = []
+    for entry in load_entries(settings):
+        row = masked_entry(entry)
+        node = runtime.get(row["key"])
+        if node is None:
+            row.update({"healthy": None, "failures": 0, "latency_ms": None, "loaded": False})
+        else:
+            row.update(
+                {
+                    "enabled": node.enabled,
+                    "healthy": node.healthy,
+                    "failures": node.failures,
+                    "latency_ms": node.latency_ms,
+                    "loaded": True,
+                }
+            )
+        out.append(row)
+    return out
 
 
 def load_entries(settings: Any | None = None) -> list[Any]:
@@ -227,7 +402,7 @@ def load_entries(settings: Any | None = None) -> list[Any]:
             return [p for p in payload if p]
         except Exception as exc:
             get_logger("proxy").warning("proxy config invalid", extra={"error": str(exc), "error_code": "QFSD-3001"})
-    raw = (settings.proxy_pool_list or "").strip()
+    raw = str(getattr(settings, "proxy_pool_list", "") or "").strip()
     if not raw:
         return []
     if raw.startswith(("[", "{")):

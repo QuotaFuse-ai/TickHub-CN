@@ -237,6 +237,112 @@ def _sina_boards(kind: str, page: int, page_size: int) -> dict[str, Any]:
     return out
 
 
+def _datacenter_board_members(code: str, page: int, page_size: int) -> dict[str, Any]:
+    """Board constituents from Eastmoney's datacenter (non-push2 host).
+
+    The report keys boards by the numeric suffix only: ``(BOARD_CODE="BK0475")``
+    filters to nothing while ``(BOARD_CODE="475")`` returns the board, and each
+    row echoes the ``BK`` spelling in ``BOARD_CODE_BK`` for verification.
+    """
+    numeric = code[2:].lstrip("0") or "0"
+    payload = em_get(
+        DATACENTER,
+        params={
+            "reportName": "RPT_BOARD_CONSTITUENT",
+            "columns": "ALL",
+            "filter": f'(BOARD_CODE="{numeric}")',
+            "pageNumber": page,
+            "pageSize": page_size,
+            "sortColumns": "SECURITY_CODE",
+            "sortTypes": "1",
+            "source": "WEB",
+            "client": "WEB",
+        },
+    )
+    result = (payload or {}).get("result") or {}
+    if not (payload or {}).get("success", True):
+        message = str((payload or {}).get("message") or "")
+        if "数据为空" in message:
+            return empty(
+                "eastmoney",
+                "push2 成分表不可用，备用日频库同样无数据",
+                board_code=code,
+                fallback_from="push2",
+                degraded="eod_constituent",
+            )
+        raise TickHubError("QFSD-9003", f"东财成分表返回错误: {message}")
+    raw = result.get("data") or []
+    for row in raw:
+        if str(row.get("BOARD_CODE_BK") or "").upper() != code:
+            raise TickHubError(
+                "QFSD-9003",
+                f"东财成分表 BOARD_CODE={numeric} 返回了 {row.get('BOARD_CODE_BK')!r}",
+            )
+    if not raw:
+        return empty(
+            "eastmoney",
+            "push2 成分表不可用，备用日频库同样无数据",
+            board_code=code,
+            fallback_from="push2",
+            degraded="eod_constituent",
+        )
+    quotes: dict[str, dict[str, Any]] = {}
+    members = [str(row.get("SECURITY_CODE") or "") for row in raw]
+    try:
+        from .quotes import tencent_quote
+
+        for start in range(0, len(members), 60):
+            quoted = tencent_quote(",".join(members[start : start + 60]))
+            quotes.update({row.get("code"): row for row in quoted.get("data") or []})
+    except TickHubError:
+        quotes = {}
+    rows = []
+    for row in raw:
+        member = str(row.get("SECURITY_CODE") or "")
+        quote = quotes.get(member) or {}
+        rows.append(
+            {
+                "code": member,
+                "name": quote.get("name"),
+                "price": quote.get("price"),
+                "change_pct": quote.get("change_pct"),
+                "change": quote.get("change"),
+                "volume": quote.get("volume"),
+                "amount": quote.get("amount"),
+                "turnover_rate": quote.get("turnover_rate"),
+                "pe": quote.get("pe"),
+                "pb": quote.get("pb"),
+                "float_market_cap": quote.get("float_market_cap"),
+                "total_market_cap": quote.get("total_market_cap"),
+                "main_net_inflow": None,
+                "main_net_ratio": None,
+            }
+        )
+    as_of = max(
+        (str(row.get("NEWEST_DATE") or "")[:10] for row in raw if row.get("NEWEST_DATE")),
+        default=None,
+    )
+    out = frame(
+        rows,
+        "eastmoney",
+        source_url=DATACENTER,
+        board_code=code,
+        fallback_from="push2",
+        degraded="eod_constituent",
+        data_as_of=as_of,
+        amount_unit="wan_yuan",
+        note="push2 熔断，改用东财成分库取名单、腾讯快照补行情；主力净流入与涨跌幅口径以腾讯为准",
+    )
+    out["data"] = {
+        "board_code": code,
+        "total": to_int(result.get("count"), len(rows)),
+        "page": page,
+        "page_size": page_size,
+        "items": rows,
+    }
+    return out
+
+
 @tool(layer="market", ttl="realtime")
 def board_members(board_code: str, page: int = 1, page_size: int = 100) -> dict[str, Any]:
     """Constituents of an Eastmoney industry/concept board (e.g. BK0475)."""
@@ -245,7 +351,19 @@ def board_members(board_code: str, page: int = 1, page_size: int = 100) -> dict[
         raise TickHubError("QFSD-9001", f"invalid board code: {board_code} (expected BKxxxx)")
     page = max(1, int(page or 1))
     page_size = min(max(1, int(page_size or 100)), 500)
-    payload = _clist(f"b:{code}+f:!50", _MEMBER_FIELDS, page=page, page_size=page_size)
+    try:
+        payload = _clist(f"b:{code}+f:!50", _MEMBER_FIELDS, page=page, page_size=page_size)
+    except TickHubError as exc:
+        try:
+            return _datacenter_board_members(code, page, page_size)
+        except TickHubError:
+            # Keep the push2 error so the caller still gets the breaker's retry hint.
+            raise exc
+    if not payload["items"]:
+        try:
+            return _datacenter_board_members(code, page, page_size)
+        except TickHubError:
+            return empty("eastmoney", "board members unavailable", board_code=code)
     rows = [
         {
             "code": r.get("f12"),
@@ -311,7 +429,13 @@ def board_history(board_code: str, days: int = 60) -> dict[str, Any]:
             }
         )
     if not rows:
-        return empty("eastmoney", "board history unavailable", board_code=code)
+        # No zero-auth substitute serves Eastmoney board K-lines (Tencent, Sina
+        # and THS all lack them), so state the gap instead of implying a bad code.
+        return empty(
+            "eastmoney",
+            "板块历史暂不可用：push2his 无数据，且不存在零鉴权的非 push2 替代源",
+            board_code=code,
+        )
     return frame(rows, "eastmoney", source_url=_PUSH2HIS, board_code=code)
 
 
