@@ -517,6 +517,14 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
 
         return {"ok": True, **daemon_status()}
 
+    @app.get("/api/archive/northbound")
+    def archive_northbound_api(request: Request, trade_date: str = "", limit: int = 500) -> dict[str, Any]:
+        auth(request)
+        from ..crawler import get_archive
+
+        rows = get_archive().northbound(trade_date=trade_date, limit=limit)
+        return {"ok": True, "rows": rows, "count": len(rows)}
+
     @app.post("/api/crawler/run")
     def crawler_run(request: Request, payload: dict[str, Any] = Body(default={})) -> Any:
         actor = auth(request)

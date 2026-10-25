@@ -33,6 +33,7 @@ ENDPOINTS = (
     "/api/crawler/run",
     "/api/crawler/jobs?limit=10",
     "/api/crawler/jobs/${jobId}/${suffix}",
+    "/api/archive/northbound?limit=500",
     "/api/queue",
     "/api/crosscheck",
     "/api/risk",
@@ -71,6 +72,28 @@ def test_page_sends_the_admin_token_header() -> None:
     html = ADMIN_PAGE.read_text(encoding="utf-8")
     assert "X-Admin-Token" in html
     assert "sessionStorage" in html
+
+
+def test_archive_northbound_route_serves_snapshot_rows() -> None:
+    from tickhub_cn.crawler.store import get_archive
+
+    get_archive().insert_northbound(
+        [{"channel": "hk2sh", "name": "沪股通", "net_inflow": 123456789.0,
+          "net_inflow_wan": 123456.0, "status": 1}],
+        trade_date="2026-10-23",
+        snapshot_at="2026-10-23T15:05:00",
+    )
+    client = _client()
+    assert client.get("/api/archive/northbound").status_code == 401
+
+    headers = {"x-admin-token": "t0ken"}
+    body = client.get("/api/archive/northbound", headers=headers).json()
+    assert body["count"] == 1
+    row = body["rows"][0]
+    assert (row["trade_date"], row["channel"], row["net_inflow"]) == ("2026-10-23", "hk2sh", 123456789.0)
+
+    empty = client.get("/api/archive/northbound?trade_date=2026-10-22", headers=headers).json()
+    assert empty == {"ok": True, "rows": [], "count": 0}
 
 
 def test_page_is_not_an_mcp_client() -> None:

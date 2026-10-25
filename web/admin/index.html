@@ -166,6 +166,7 @@
     <a href="#/mcp" data-route="mcp">MCP 调试</a>
     <a href="#/data" data-route="data">数据核查</a>
     <a href="#/crawler" data-route="crawler">抓取任务</a>
+    <a href="#/northbound" data-route="northbound">北向资金</a>
     <a href="#/logs" data-route="logs">日志</a>
     <a href="#/config" data-route="config">运行配置</a>
     <a href="#/audit" data-route="audit">审计</a>
@@ -196,6 +197,7 @@ const state = {
   tools: null,
   toolsView: null,
   mcpLayer: "",
+  nbDate: "",
   theme: localStorage.getItem("tickhub_admin_theme") || "auto",
   keepSearch: false,
   scanning: false,
@@ -1359,6 +1361,55 @@ views.crawler = async () => {
     ${kv(Object.entries(data.archive || {}))}`;
 };
 
+views.northbound = async () => {
+  const data = await api("/api/archive/northbound?limit=500");
+  const rows = data.rows || [];
+  const dates = [...new Set(rows.map((r) => r.trade_date).filter(Boolean))].sort().reverse();
+  const date = dates.includes(state.nbDate) ? state.nbDate : (dates[0] || "");
+  const day = rows.filter((r) => r.trade_date === date);
+  const yi = (value) => Math.round((Number(value) || 0) / 1e6) / 100;
+  const total = (channels) => yi(day
+    .filter((r) => channels.includes(r.channel))
+    .reduce((sum, r) => sum + (Number(r.net_inflow) || 0), 0));
+  const detail = day.map((r) => ({
+    "通道": r.name || r.channel,
+    "净流入(亿)": yi(r.net_inflow),
+    "净流入(万元)": r.net_inflow_wan == null ? "" : Math.round(Number(r.net_inflow_wan) * 100) / 100,
+    "状态": r.status,
+    "快照时间": fmtStamp(r.snapshot_at),
+    "来源": r.source,
+  }));
+  return `
+    <h2>北向资金</h2>
+    <p class="sub">来自归档表 <code>northbound_flow</code>：抓取任务 <code>northbound</code> 每个交易日按通道快照一次，
+      同日重跑只刷新数值；休市日不写入，避免覆盖上一交易日的真实数据。</p>
+    <div class="row">
+      <label>交易日
+        <select id="nb-date">${dates.length
+          ? dates.map((d) => `<option value="${esc(d)}"${d === date ? " selected" : ""}>${esc(d)}</option>`).join("")
+          : "<option value=''>暂无快照</option>"}</select>
+      </label>
+      <button type="button" data-action="nb-refresh">切换</button>
+    </div>
+    ${cards([
+      ["交易日", date || "—"],
+      ["北向合计(亿)", total(["hk2sh", "hk2sz"])],
+      ["南向合计(亿)", total(["sh2hk", "sz2hk"])],
+      ["当日通道", day.length],
+    ])}
+    <h3>当日通道明细</h3>
+    ${table(detail, ["通道", "净流入(亿)", "净流入(万元)", "状态", "快照时间", "来源"])}
+    <h3>全部快照</h3>
+    <p class="sub">最近 ${rows.length} 条（上限 500），按交易日与通道排序。</p>
+    ${table(rows.map((r) => ({
+      "交易日": r.trade_date,
+      "通道": r.name || r.channel,
+      "净流入(亿)": yi(r.net_inflow),
+      "状态": r.status,
+      "快照时间": fmtStamp(r.snapshot_at),
+    })), ["交易日", "通道", "净流入(亿)", "状态", "快照时间"])}`;
+};
+
 views.logs = async () => {
   const data = await api("/api/logs?limit=200");
   return `
@@ -1456,6 +1507,12 @@ async function handleAction(action, button) {
   const show = (value) => { if (result) result.innerHTML = `<h3>结果</h3>${typeof value === "string" ? value : pre(value)}`; };
 
   if (action === "refresh-view") return renderRoute(true);
+
+  if (action === "nb-refresh") {
+    const pick = $("#nb-date");
+    state.nbDate = pick ? pick.value : "";
+    return renderRoute(true);
+  }
   if (action === "search-close") return hideCrossResults();
 
   if (action === "sources-check") {
