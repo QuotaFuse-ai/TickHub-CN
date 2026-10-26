@@ -28,7 +28,7 @@ from .store import get_archive, item_key
 # are registered alongside them but run on their own crons, so ``all`` stays the
 # announcement-oriented round it always was.
 DEFAULT_TASKS = ("announcements", "reports", "risks", "northbound")
-MARKET_TASKS = ("financials", "kline")
+MARKET_TASKS = ("financials", "kline", "quote")
 TASKS = DEFAULT_TASKS + MARKET_TASKS
 DEFAULT_INDEX = "000300"
 DEDUPE_TTL = 7 * 24 * 3600
@@ -38,6 +38,7 @@ FINANCIAL_STATEMENTS = ("balance", "income", "cashflow")
 FINANCIAL_PERIODS = 8
 # First phase keeps one recent window per code; the archive grows forward daily.
 KLINE_LIMIT = 120
+QUOTE_BATCH = 20
 
 Progress = Callable[[dict[str, Any]], None]
 StopCheck = Callable[[], bool]
@@ -578,6 +579,63 @@ def crawl_kline(
     return result
 
 
+def _quote_rows(payload: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return [], []
+    quotes = data.get("quotes")
+    rows = [r for r in quotes.values() if isinstance(r, dict)] if isinstance(quotes, dict) else []
+    failures = data.get("failures")
+    return rows, [f for f in failures if isinstance(f, dict)] if isinstance(failures, list) else []
+
+
+def crawl_quote(
+    codes: Iterable[str],
+    *,
+    progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
+) -> TaskResult:
+    """Close snapshot for PE/PB (G-05); one archive row per code and trade date."""
+    archive = get_archive()
+    result = TaskResult(task="quote")
+    code_list = list(codes)
+    trade_date = last_trading_day()
+    result.detail["trade_date"] = trade_date
+    cancelled = False
+
+    for start in range(0, len(code_list), QUOTE_BATCH):
+        if should_stop is not None and should_stop():
+            cancelled = True
+            break
+        chunk = code_list[start : start + QUOTE_BATCH]
+        try:
+            payload = _call("tencent_quote_batch", codes=",".join(chunk), max_codes=len(chunk))
+            rows, failures = _quote_rows(payload)
+        except Exception as exc:
+            for code in chunk:
+                result.failed.append(code)
+                result.errors[code] = str(exc)[:300]
+            if progress:
+                progress({"task": "quote", "codes": len(chunk), "fetched": 0, "failed": True})
+            continue
+        result.fetched += len(rows)
+        inserted = archive.insert_quotes(rows, trade_date=trade_date)
+        result.inserted += inserted
+        for failure in failures:
+            code = str(failure.get("code") or "")
+            if code:
+                result.failed.append(code)
+                result.errors[code] = str(failure.get("error") or "")[:300]
+        if progress:
+            progress({"task": "quote", "codes": len(chunk), "fetched": len(rows), "inserted": inserted})
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
+    elif result.failed:
+        result.status = "partial" if result.inserted or result.fetched else "failed"
+    return result
+
+
 _HEARTBEAT_STATUS = {
     "ok": "ok",
     "empty": "ok",
@@ -626,8 +684,8 @@ def run_task(
     """Run one crawl task.
 
     ``all`` keeps the announcement-oriented round (announcements / reports /
-    risks / northbound); ``financials`` / ``kline`` run on their own crons.
-    ``should_stop`` is polled between codes and between sub-tasks. A
+    risks / northbound); ``financials`` / ``kline`` / ``quote`` run on their own
+    crons. ``should_stop`` is polled between codes and between sub-tasks. A
     cancelled run keeps whatever already landed in the archive, skips the
     remaining sub-tasks, and reports ``status="cancelled"`` with
     ``detail["cancelled"]``.
@@ -688,6 +746,9 @@ def run_task(
             results.append(
                 crawl_kline(watchlist, concurrency=concurrency, progress=progress, should_stop=should_stop)
             )
+            cancelled = results[-1].status == "cancelled"
+        if "quote" in plan and not cancelled and not stop():
+            results.append(crawl_quote(watchlist, progress=progress, should_stop=should_stop))
             cancelled = results[-1].status == "cancelled"
     except Exception as exc:
         elapsed = (now_shanghai() - started).total_seconds()
@@ -767,6 +828,7 @@ def crawl_status() -> dict[str, Any]:
         "financials_cron": settings.offline_crawler_financials_cron,
         "financials_season_cron": settings.offline_crawler_financials_season_cron,
         "kline_cron": settings.offline_crawler_kline_cron,
+        "quote_cron": settings.offline_crawler_quote_cron,
         "concurrency": settings.offline_crawler_concurrency,
         "watchlist": len(configured) or f"index:{DEFAULT_INDEX}",
         "market_watchlist": len(configured),
@@ -804,6 +866,7 @@ __all__ = [
     "crawl_financials",
     "crawl_kline",
     "crawl_northbound",
+    "crawl_quote",
     "crawl_reports",
     "crawl_risks",
     "crawl_status",

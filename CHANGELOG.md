@@ -2,6 +2,14 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-10-27 · 财报 / K线 / 收盘行情采集（T-102）
+
+- 新增三个采集任务：`financials`（三张报表 + 勾稽校验，按 `report_date|statement` 去重）、`kline`（自选池日线前复权，按 `trade_date|period|adjust` 去重）、`quote`（自选池收盘快照，按 `code|trade_date` 去重）。三者均已加入 `TASKS` 与归档表，事件分别以 `financial` / `kline` / `quote` 发布到 `fc:stockdata:events`。
+- 市场类任务只跑 `OFFLINE_CRAWLER_WATCHLIST`，不复用指数成分兜底；自选池为空时整轮返回 `empty` 并在任务详情里写明原因，不发起任何数据源请求。`OFFLINE_CRAWLER_MAX_CODES` 控制单轮股票数。
+- 守护进程为三项任务注册独立 cron（均可由环境变量覆盖）：财报 `0 18 * * 6`、财报季 `0 18 * 1,4,7,8,10 1-5`、K线 `15 15 * * 1-5`、行情 `10 15 * * 1-5`。只在 `--task all` 时挂载，单任务守护进程仍只跑自己的主 cron；状态接口与 `doctor` 一并暴露/校验这些 cron。
+- 勾稽校验结果写入事件的 `quality_metrics.balance_check_result`；入库保持 `INSERT OR IGNORE`，重跑同一天不会新增行，也不会让 Stream 增长；Redis 不可用时事件落 `event_outbox` 补发，不影响抓取结果。
+- `all` 任务与既有四个任务的语义、CLI 参数保持不变（`--task` 的帮助文本补上了三个新值）。
+
 ## 2026-10-26 · 事件发布旁路（T-101）
 
 - 新增 `crawler/event_publisher.py`：把新入库的公告、研报、风险、北向记录组装为契约 v0.2 事件，写入 Redis Stream `fc:stockdata:events`（`XADD ... MAXLEN ~ 100000`）。`event_id` 由 `provider|data_type|symbol|biz_key` 的 SHA-256 决定，重复投递由消费端按 ID 去重。

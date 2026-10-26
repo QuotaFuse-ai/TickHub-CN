@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS financial_report (
     code TEXT, report_date TEXT, statement TEXT, payload TEXT, crawl_time TEXT,
     PRIMARY KEY (code, report_date, statement)
 );
+CREATE TABLE IF NOT EXISTS quote_snapshot (
+    code TEXT, trade_date TEXT, close REAL, pe REAL, pb REAL,
+    total_market_cap REAL, float_market_cap REAL, payload TEXT, crawl_time TEXT,
+    PRIMARY KEY (code, trade_date)
+);
 CREATE TABLE IF NOT EXISTS shareholder (
     code TEXT, report_date TEXT, payload TEXT, crawl_time TEXT,
     PRIMARY KEY (code, report_date)
@@ -347,11 +352,11 @@ def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, 
     )
 
 
-# --------------------------------------------------- T-102 market events
+# ------------------------------------------------------- T-102 market events
 #
-# Financials and K-line became archive writers in T-102. Event ids follow the
-# same provider|data_type|symbol|biz_key recipe as the four original types, so
-# a re-run that inserts nothing publishes nothing.
+# Financials, K-line and close quotes only became archive writers in T-102.
+# Their event ids follow the same provider|data_type|symbol|biz_key recipe as
+# the four original types, so a re-run that inserts nothing publishes nothing.
 
 _REPORT_TYPES = {3: "Q1", 6: "H1", 9: "Q3", 12: "Annual"}
 _CHECK_QUALITY = {"pass": "normal", "warn": "suspicious", "fail": "bad", "skip": "suspicious"}
@@ -431,6 +436,48 @@ def _kline_event(code: str, row: dict[str, Any], *, period: str, adjust: str) ->
         content={
             "structured_fields": fields,
             "quality_metrics": {"confidence": "high", "quality_status": "normal"},
+        },
+        source_info={"provider": "tencent"},
+    )
+
+
+def _tencent_time(value: Any) -> _dt.datetime | None:
+    """Tencent stamps quotes as ``20261027150003`` (local) or a slashed time."""
+    text = str(value or "").strip()
+    for fmt in ("%Y%m%d%H%M%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return _dt.datetime.strptime(text, fmt).replace(tzinfo=_CN_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def _quote_event(
+    code: str, row: dict[str, Any], *, trade_date: str, stamp: _dt.datetime | None
+) -> dict[str, Any]:
+    day = stamp.strftime("%Y-%m-%d") if stamp else trade_date
+    biz = f"{day}|{stamp.strftime('%H%M%S') if stamp else day}"
+    fields: dict[str, Any] = {"trade_date": day}
+    close = _amount(row.get("price") if row.get("price") is not None else row.get("close"))
+    if close is not None:
+        fields["close"] = close
+    for key, name in (("total_market_cap", "total_market_cap"), ("pe", "pe_ttm"), ("pb", "pb")):
+        value = _amount(row.get(key))
+        if value is not None:
+            fields[name] = value
+    return event_publisher.build_event(
+        provider="tencent",
+        data_type="quote",
+        symbol=code,
+        market="CN",
+        biz_key=biz,
+        event_time=stamp or day,
+        content={
+            "structured_fields": fields,
+            "quality_metrics": {
+                "confidence": "high",
+                "quality_status": "suspicious" if row.get("is_stale") else "normal",
+            },
         },
         source_info={"provider": "tencent"},
     )
@@ -812,6 +859,54 @@ class Archive:
                 _log_event_error(exc)
         return inserted
 
+    def insert_quotes(
+        self, rows: list[dict[str, Any]], *, trade_date: str = "", source: str = "tencent"
+    ) -> int:
+        """One close snapshot per (code, trade_date); reruns add nor publish nothing."""
+        inserted = 0
+        stamp = _now()
+        publishing = bool(rows) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any], str, _dt.datetime | None]] = []
+        seen: set[tuple[str, str]] = set()
+        with self._lock, self.connect() as con:
+            for row in rows or []:
+                code = str(row.get("code") or "")
+                stamp_time = _tencent_time(row.get("timestamp"))
+                day = stamp_time.strftime("%Y-%m-%d") if stamp_time else (trade_date or _now()[:10])
+                if not code or not day or (code, day) in seen:
+                    continue
+                seen.add((code, day))
+                existing = con.execute(
+                    "SELECT 1 FROM quote_snapshot WHERE code=? AND trade_date=?", (code, day)
+                ).fetchone()
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO quote_snapshot"
+                    " (code, trade_date, close, pe, pb, total_market_cap, float_market_cap, payload, crawl_time)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        code,
+                        day,
+                        row.get("price"),
+                        row.get("pe"),
+                        row.get("pb"),
+                        row.get("total_market_cap"),
+                        row.get("float_market_cap"),
+                        json.dumps(row, ensure_ascii=False, default=str),
+                        stamp,
+                    ),
+                )
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and existing is None:
+                    fresh.append((code, row, day, stamp_time))
+        for code, row, day, stamp_time in fresh:
+            try:
+                event_publisher.publish(_quote_event(code, row, trade_date=day, stamp=stamp_time))
+            except Exception as exc:
+                _log_event_error(exc)
+        return inserted
+
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:
         with self._lock, self.connect() as con:
             cur = con.execute(
@@ -856,6 +951,7 @@ class Archive:
             "northbound_flow",
             "financial_report",
             "kline",
+            "quote_snapshot",
         }
         if table not in allowed:
             raise ValueError(f"unsupported archive table: {table}")
@@ -903,6 +999,9 @@ class Archive:
     def klines(self, code: str = "", limit: int = 200) -> list[dict[str, Any]]:
         return self.query("kline", code=code, limit=limit, order="trade_date")
 
+    def quotes(self, code: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        return self.query("quote_snapshot", code=code, limit=limit, order="trade_date")
+
     def tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.query("crawl_task", limit=limit, order="started_at")
 
@@ -925,6 +1024,7 @@ class Archive:
             "northbound_flow",
             "financial_report",
             "kline",
+            "quote_snapshot",
             "crawl_task",
         )
         out: dict[str, Any] = {"path": str(self.path), "size_kb": 0}

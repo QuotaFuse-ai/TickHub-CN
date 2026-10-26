@@ -266,7 +266,11 @@ def _progress(state: State) -> Callable[[dict[str, Any]], None]:
 def start_all_cmd(
     host: str = typer.Option("127.0.0.1", "--host", help="MCP HTTP bind address."),
     port: int = typer.Option(8000, "--port", help="MCP HTTP port (the only listening socket)."),
-    task: str = typer.Option("all", "--task", help="Crawler task: all | announcements | reports | risks | northbound."),
+    task: str = typer.Option(
+        "all",
+        "--task",
+        help="Crawler task: all | announcements | reports | risks | northbound | financials | kline | quote.",
+    ),
     crawler: str = typer.Option("auto", "--crawler", help="auto (OFFLINE_CRAWLER_ENABLE) | on | off."),
     restart_limit: int = typer.Option(3, "--restart-limit", help="Child restarts allowed inside a 5 minute window."),
 ) -> None:
@@ -713,7 +717,11 @@ def crawler_status(ctx: typer.Context, output: Optional[str] = _out_opt()) -> No
 @crawler_app.command("run")
 def crawler_run(
     ctx: typer.Context,
-    task: str = typer.Option("all", "--task", help="all | announcements | reports | risks | northbound."),
+    task: str = typer.Option(
+        "all",
+        "--task",
+        help="all | announcements | reports | risks | northbound | financials | kline | quote.",
+    ),
     codes: str = typer.Option("", "--codes", help="Comma-separated codes; defaults to the watchlist."),
     days: int = typer.Option(7, "--days", help="Look-back window in days."),
     limit: Optional[int] = typer.Option(None, "--limit", help="Codes per run."),
@@ -901,10 +909,20 @@ def _config_check_payload() -> dict[str, Any]:
     try:
         from apscheduler.triggers.cron import CronTrigger
 
-        CronTrigger.from_crontab(settings.offline_crawler_cron)
-        add("crawler_cron", "ok", settings.offline_crawler_cron)
+        for name, cron in (
+            ("crawler_cron", settings.offline_crawler_cron),
+            ("crawler_cron_financials", settings.offline_crawler_financials_cron),
+            ("crawler_cron_financials_season", settings.offline_crawler_financials_season_cron),
+            ("crawler_cron_kline", settings.offline_crawler_kline_cron),
+            ("crawler_cron_quote", settings.offline_crawler_quote_cron),
+        ):
+            try:
+                CronTrigger.from_crontab(cron)
+                add(name, "ok", cron)
+            except Exception as exc:  # noqa: BLE001
+                add(name, "error", f"{cron}: {exc}")
     except Exception as exc:  # noqa: BLE001
-        add("crawler_cron", "error", f"{settings.offline_crawler_cron}: {exc}")
+        add("crawler_cron", "error", f"apscheduler unavailable: {exc}")
 
     status = _overall(checks)
     return envelope(

@@ -172,6 +172,41 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
             )
             return 3
 
+    # Market collectors only join the full daemon. Their crons are tied to the
+    # post-close window, and a single-task daemon already runs its task on the
+    # main cron, so adding these would duplicate every round.
+    market_jobs: list[tuple[str, str, str, Any]] = []
+    if task == "all":
+        for job_id, task_name, env_name, cron in (
+            (
+                "offline_crawl_financials",
+                "financials",
+                "OFFLINE_CRAWLER_FINANCIALS_CRON",
+                settings.offline_crawler_financials_cron,
+            ),
+            (
+                "offline_crawl_financials_season",
+                "financials",
+                "OFFLINE_CRAWLER_FINANCIALS_SEASON_CRON",
+                settings.offline_crawler_financials_season_cron,
+            ),
+            ("offline_crawl_kline", "kline", "OFFLINE_CRAWLER_KLINE_CRON", settings.offline_crawler_kline_cron),
+            ("offline_crawl_quote", "quote", "OFFLINE_CRAWLER_QUOTE_CRON", settings.offline_crawler_quote_cron),
+        ):
+            try:
+                market_jobs.append((job_id, task_name, cron, CronTrigger.from_crontab(cron, timezone="Asia/Shanghai")))
+            except Exception as exc:
+                _log().error(
+                    f"invalid {env_name}",
+                    extra={
+                        "event": "crawler_cron_invalid",
+                        "error_code": "QFSD-3001",
+                        "detail": {"env": env_name},
+                        "error": str(exc)[:200],
+                    },
+                )
+                return 3
+
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
         _tick,
@@ -193,6 +228,20 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
             args=["northbound"],
             id="offline_crawl_northbound",
             name="offline crawl (northbound)",
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+            replace_existing=True,
+        )
+    for job_id, task_name, _cron, trigger_ in market_jobs:
+        # One cron per market task: a slow financial sweep must never delay the
+        # announcement round or the post-close kline/quote snapshots.
+        scheduler.add_job(
+            _tick,
+            trigger_,
+            args=[task_name],
+            id=job_id,
+            name=f"offline crawl ({task_name})",
             coalesce=True,
             max_instances=1,
             misfire_grace_time=3600,
@@ -234,6 +283,16 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
     next_run = _next_fire(trigger)
     northbound_next = _next_fire(northbound_trigger) if northbound_trigger is not None else None
     northbound_cron = settings.offline_crawler_northbound_cron if wants_northbound else ""
+    market_state: dict[str, Any] = {
+        "financials_cron": "",
+        "financials_season_cron": "",
+        "kline_cron": "",
+        "quote_cron": "",
+    }
+    for job_id, _task_name, cron, trigger_ in market_jobs:
+        prefix = job_id.removeprefix("offline_crawl_")
+        market_state[f"{prefix}_cron"] = cron
+        market_state[f"{prefix}_next_run_at"] = _next_fire(trigger_)
     write_state(
         pid=os.getpid(),
         cron=settings.offline_crawler_cron,
@@ -242,6 +301,7 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
         started_at=_dt.datetime.now().isoformat(timespec="seconds"),
         next_run_at=next_run,
         northbound_next_run_at=northbound_next,
+        **market_state,
     )
     _log().info(
         "crawler daemon started",
@@ -255,6 +315,7 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
                 "timezone": "Asia/Shanghai",
                 "next_run_at": next_run,
                 "northbound_next_run_at": northbound_next,
+                "market_state": market_state,
             },
         },
     )
@@ -287,6 +348,14 @@ def daemon_status() -> dict[str, Any]:
         "next_run_at": state.get("next_run_at"),
         "northbound_cron": state.get("northbound_cron", ""),
         "northbound_next_run_at": state.get("northbound_next_run_at"),
+        "financials_cron": state.get("financials_cron", ""),
+        "financials_next_run_at": state.get("financials_next_run_at"),
+        "financials_season_cron": state.get("financials_season_cron", ""),
+        "financials_season_next_run_at": state.get("financials_season_next_run_at"),
+        "kline_cron": state.get("kline_cron", ""),
+        "kline_next_run_at": state.get("kline_next_run_at"),
+        "quote_cron": state.get("quote_cron", ""),
+        "quote_next_run_at": state.get("quote_next_run_at"),
         "last_error": state.get("last_error", ""),
         "updated_at": state.get("updated_at"),
     }
