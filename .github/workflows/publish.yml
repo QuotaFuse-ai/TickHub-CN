@@ -1,7 +1,9 @@
 name: Publish to PyPI
 
 # Manual only: nothing is uploaded until someone explicitly dispatches this
-# workflow. Trusted Publishing setup is described in docs/PUBLISHING.md §2.
+# workflow. Uses GitHub OIDC Trusted Publishing; the PyPI/TestPyPI publisher is
+# configured on the index side (owner QuotaFuse-ai, repo TickHub-CN, this file,
+# environments pypi / testpypi). See the "发布" section of README.md.
 on:
   workflow_dispatch:
     inputs:

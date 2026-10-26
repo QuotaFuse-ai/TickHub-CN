@@ -1,4 +1,4 @@
-"""CL-10: admin console auth, read-only guard, audit trail (docs/TEST_PLAN.md)."""
+"""CL-10: admin console auth, read-only guard, audit trail."""
 
 from __future__ import annotations
 

@@ -1274,15 +1274,8 @@ pytest -m live
 
 ## 文档
 
-- [docs/CLI_USAGE.md](docs/CLI_USAGE.md) —— 每条命令、参数与退出码
-- [docs/MCP_API_CONTRACT.md](docs/MCP_API_CONTRACT.md) —— 工具契约、envelope、别名
-- [docs/DATA_MODEL.md](docs/DATA_MODEL.md) —— 实体、字段、单位、缓存键
-- [docs/TEST_PLAN.md](docs/TEST_PLAN.md) —— 契约 / 集成 / 回归 / UI 测试
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) —— pip、Docker、systemd、反向代理
-- [docs/PIP_DISTRIBUTION.md](docs/PIP_DISTRIBUTION.md) —— 打包与发布
-- [docs/MULTI_MODEL_INTEGRATION.md](docs/MULTI_MODEL_INTEGRATION.md) —— 多模型接线与客户端矩阵
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) —— 更新记录（仓库唯一文档）
 - [skills/tickhub-cn/SKILL.md](skills/tickhub-cn/SKILL.md) —— Agent 技能包
-- [docs/decisions/](docs/decisions/) —— 架构决策记录（ADR）索引，含历史工单死链说明
 
 ---
 
@@ -1306,7 +1299,22 @@ python scripts/gen_tool_catalog.py --format skill \
 - 新增工具写进 `src/tickhub_cn/datasources/base.py` 的注册表，描述与参数由
   `scripts/gen_tool_catalog.py` 生成引用表，CI 会比对。
 - 每个数字都必须可追溯到一次上游响应；禁止在工具里做估算或模型推断。
-- 改动数据源行为时，同步 `docs/MCP_API_CONTRACT.md` 与 `docs/DATA_MODEL.md`。
+- 改动数据源行为时，同步更新 `th-cn tool list` 的输出（`scripts/gen_tool_catalog.py` 重新生成）与 `docs/CHANGELOG.md`。
+
+---
+
+<a id="publish"></a>
+
+## 发布
+
+**PyPI**（已上线，当前 `1.0.1`）：
+
+- 常规发布：GitHub → *Actions* → **Publish to PyPI** → *Run workflow*，选 `pypi` 或 `testpypi`。走 Trusted Publishing（OIDC），仓库不存任何密钥。
+- 一次性配置（已完成，换项目/环境时需要）：PyPI → *Publishing* → *Add a new pending publisher*，填 project `tickhub-cn`、owner `QuotaFuse-ai`、repo `TickHub-CN`、workflow `publish.yml`、environment `pypi`；TestPyPI 用环境 `testpypi`（独立账号）。
+- 手工兜底（无 Actions 时）：`python -m twine check dist/*` 先校验，再用 `TWINE_USERNAME=__token__` + API token 上传**同一批**已校验的文件，不要在 check 与 upload 之间重新构建。
+- 版本一经上传不可覆盖，任何改动都要先改 `pyproject.toml` 的版本号并重建。
+
+**容器镜像**：手动触发 **Docker image (GHCR)** workflow，标签取 `pyproject.toml` 版本号并同时打 `:latest`；推 tag 不会自动发布。
 
 ---
 

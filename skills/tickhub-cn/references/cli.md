@@ -1,8 +1,7 @@
 # `th-cn` CLI reference
 
 The CLI is the fourth usage mode alongside local import, MCP stdio and MCP
-HTTP. It is for scripts, cron jobs, operations and manual queries. Full
-narrative: `docs/CLI_USAGE.md`.
+HTTP. It is for scripts, cron jobs, operations and manual queries.
 
 ## Output contract
 

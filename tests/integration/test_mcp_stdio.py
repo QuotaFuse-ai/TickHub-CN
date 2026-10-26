@@ -1,4 +1,4 @@
-"""CL-05: MCP over stdio (docs/TEST_PLAN.md section 2).
+"""CL-05: MCP over stdio.
 
 Spawns ``th-cn mcp stdio`` with pipes and drives the raw JSON-RPC session:
 initialize → initialized → tools/list → tools/call. Every stdout line must be

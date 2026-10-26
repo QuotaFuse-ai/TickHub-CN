@@ -1,4 +1,4 @@
-"""CL-08: offline crawl writes are idempotent (docs/TEST_PLAN.md section 2)."""
+"""CL-08: offline crawl writes are idempotent."""
 
 from __future__ import annotations
 

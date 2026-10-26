@@ -1,9 +1,8 @@
 """Local archive backing the offline crawler.
 
-SQLite by default (zero setup, ships with Python). The schema mirrors
-``docs/DATA_MODEL.md``; tables the crawler does not fill yet are still created
-so operators and downstream jobs see a stable shape. Writes are idempotent so
-a re-run never duplicates an announcement or a report.
+SQLite by default (zero setup, ships with Python). Tables the crawler does not
+fill yet are still created so operators and downstream jobs see a stable shape.
+Writes are idempotent so a re-run never duplicates an announcement or a report.
 """
 
 from __future__ import annotations

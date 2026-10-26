@@ -1,4 +1,4 @@
-"""CL-06: MCP over Streamable HTTP at ``/mcp`` (docs/TEST_PLAN.md section 2)."""
+"""CL-06: MCP over Streamable HTTP at ``/mcp``."""
 
 from __future__ import annotations
 

@@ -264,7 +264,7 @@ def test_page_renders_charts_as_inline_svg() -> None:
     assert "function svgStack(" in html
     for caller in ("svgBars(Object.entries(status.layers", "svgStack([", "svgBars(latency", "svgBars(throughput"):
         assert caller in html, caller
-    # Zero CDN (DEC-017): no external script/style/image URL anywhere.
+    # Zero CDN: no external script/style/image URL anywhere.
     assert "https://" not in html
     assert re.search(r"<(script|link|img)\b[^>]*\b(src|href)=", html) is None
 

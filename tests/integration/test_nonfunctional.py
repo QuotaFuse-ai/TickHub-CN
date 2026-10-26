@@ -1,4 +1,4 @@
-"""NF-01..NF-06 (docs/TEST_PLAN.md): import cost, latency, logs, cache bounds."""
+"""NF-01..NF-06: import cost, latency, logs, cache bounds."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CL-07: ``th-cn start-all`` process layout (docs/TEST_PLAN.md section 2).
+"""CL-07: ``th-cn start-all`` process layout.
 
 One listening socket in the main process, one supervised crawler child with no
 socket of its own, automatic restart after a child crash, and a graceful child

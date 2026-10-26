@@ -3,7 +3,7 @@
 Every test runs inside its own temporary working directory with the Redis
 backend disabled (in-process cache) and the archive pointed at ``tmp_path``.
 That keeps ``./logs/``, ``./var/archive`` and ``field_map.toml`` writes out of
-the repository, as required by docs/TEST_PLAN.md section 5.
+the repository, so tests never touch a developer's real archive or cache.
 """
 
 from __future__ import annotations
@@ -75,11 +75,6 @@ def isolated_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def repo_root() -> Path:
     return ROOT
-
-
-@pytest.fixture
-def contract_path() -> Path:
-    return ROOT / "docs" / "MCP_API_CONTRACT.md"
 
 
 @pytest.fixture
