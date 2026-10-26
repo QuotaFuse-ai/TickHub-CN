@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://pypi.org/project/tickhub-cn/"><img src="https://img.shields.io/pypi/v/tickhub-cn.svg" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
   <a href="https://github.com/QuotaFuse-ai/TickHub-CN/stargazers"><img src="https://img.shields.io/github/stars/QuotaFuse-ai/TickHub-CN?style=social" alt="Stars"></a>
   <br>
@@ -65,7 +66,7 @@ TickHub-CN（A股数据枢纽）只做一件事：**把 A 股数据变成模型�
 **这一步没有任何密钥。** 不注册、不申请 AppID、不填 token、不配代理，复制下面两行就出数：
 
 ```bash
-pip install https://github.com/QuotaFuse-ai/TickHub-CN/releases/download/v1.0.1/tickhub_cn-1.0.1-py3-none-any.whl
+pip install tickhub-cn
 th-cn stock info 600000
 ```
 
@@ -91,8 +92,11 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 > 为什么能这么快：**① 零密钥** —— 安装完就结束，没有任何登录/授权步骤；
 > **② 行情走腾讯源** —— 不封 IP，不需要代理；**③ Redis 可选** —— 没装 Redis 自动用进程内缓存。
 >
-> PyPI 尚未发布，所以安装地址指向 GitHub Release（版本更新后文件名里的版本号会变，
-> 以 [Releases](https://github.com/QuotaFuse-ai/TickHub-CN/releases) 页为准）。
+> 已发布到 [PyPI](https://pypi.org/project/tickhub-cn/)，`pip install tickhub-cn` 即装最新版；
+> 需要固定版本就写 `pip install tickhub-cn==1.0.1`。国内网络可加
+> `-i https://pypi.tuna.tsinghua.edu.cn/simple`；镜像同步有延迟，若提示找不到版本，
+> 去掉 `-i` 直连官方源即可。离线安装包见
+> [Releases](https://github.com/QuotaFuse-ai/TickHub-CN/releases)。
 > 想从源码装、带管理台或开发依赖，见 [完整安装](#quickstart)。
 
 ---
@@ -208,12 +212,15 @@ Python API ───┘        ├─► 限流 / 熔断 / 代理池 / 重试
 **3 步，2 分钟。** 只想要最快那条路？[30 秒上手](#zero-key) 两条命令即可。
 
 ```bash
-# 1. 安装（仓库方式）
+# 1. 安装（二选一）
+pip install tickhub-cn              # 直接用 PyPI 上的发行版
+
+# 或从源码装，便于改代码：
 git clone https://github.com/QuotaFuse-ai/TickHub-CN.git
 cd TickHub-CN
 python -m venv .venv
 . .venv/bin/activate                 # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"              # 也可直接装 Release 里的 wheel，见 30 秒上手
+pip install -e ".[dev]"
 
 # 2. 自检（环境 + 缓存后端 + 数据源）
 th-cn doctor
@@ -236,7 +243,7 @@ th-cn kline get 600000 --period daily --limit 20
 | `.[notes]` | pypdf / pdfminer.six | 财报附注 PDF 正文摘录 |
 | `.[docx]` | python-docx | 公告/研报 Word 解析 |
 | `.[db]` | sqlalchemy + MySQL/PostgreSQL 驱动 | 日志落库 |
-| `.[dev]` | pytest | 开发与测试 |
+| `.[dev]` | pytest / pytest-asyncio / PyYAML | 开发与测试 |
 | `.[all]` | admin + db + sources | 一次装齐 |
 
 一键盘后服务（MCP + 定时爬虫）：
