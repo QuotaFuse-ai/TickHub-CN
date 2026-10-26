@@ -8,6 +8,12 @@ retried later with exponential backoff. ``event_id`` is a deterministic hash of
 the business fact, which is what makes outbox retries and re-runs idempotent on
 the consumer side.
 
+Contract §2.2.4: publishing is asynchronous. ``publish`` only hands the event
+to a bounded queue and returns; one background worker serialises and delivers
+it, so a slow Redis never stalls the crawl. ``flush_outbox`` (and therefore
+every round/tick finish) first drains that queue, which also gives tests and
+shutdown a deterministic barrier via ``wait_idle``.
+
 Nothing here touches the network at import time; the Redis client is created on
 first use and the module is inert while ``EVENT_PUBLISH_ENABLE`` is false.
 """
@@ -17,6 +23,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import queue
 import re
 import sqlite3
 import threading
@@ -39,6 +46,10 @@ AGED_ALERT_INTERVAL = 3600
 CONNECT_BACKOFF_SECONDS = 30
 PUBLISH_TIMEOUT_SECONDS = 2.0
 IN_CHUNK = 500
+# Publishing is a bounded side path: when the worker falls behind, new events
+# go straight to the outbox instead of blocking the crawler (§2.2.4/§2.2.5).
+QUEUE_MAXSIZE = 10_000
+DRAIN_TIMEOUT_SECONDS = 30.0
 
 OUTBOX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS event_outbox (
@@ -160,6 +171,10 @@ class EventPublisher:
         self._aged_alert_at = 0.0
         self._heartbeat_pruned_at = 0.0
         self._lock = threading.Lock()
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=QUEUE_MAXSIZE)
+        self._queued = 0
+        self._drained = threading.Condition(self._lock)
+        self._worker: threading.Thread | None = None
 
     # ------------------------------------------------------------ connection
 
@@ -268,13 +283,46 @@ class EventPublisher:
             return True
         return claimed
 
-    # ------------------------------------------------------------- publish
+    # -------------------------------------------------------------- worker
 
-    def publish(self, event: dict[str, Any]) -> None:
-        if not self.enabled:
+    def _ensure_worker(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.is_alive():
             return
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(target=self._run_worker, name="fc-event-publisher", daemon=True)
+            self._worker.start()
+
+    def _run_worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            try:
+                self._process(item)
+            except Exception as exc:  # a bad event must not kill the side path
+                self._last_error = f"worker: {exc}"[:200]
+                _log().warning(
+                    "event publish worker error",
+                    extra={
+                        "event": "event_publish_worker_failed",
+                        "error_code": "QFSD-2001",
+                        "error": str(exc)[:200],
+                    },
+                )
+            finally:
+                self._queue.task_done()
+                with self._drained:
+                    self._queued = max(0, self._queued - 1)
+                    if not self._queued:
+                        self._drained.notify_all()
+
+    def _serialize(self, event: dict[str, Any]) -> str | None:
         try:
-            payload = json.dumps(event, ensure_ascii=False, default=str)
+            return json.dumps(event, ensure_ascii=False, default=str)
         except Exception as exc:
             with self._lock:
                 self.publish_failed_total += 1
@@ -283,16 +331,12 @@ class EventPublisher:
                 "event serialize failed",
                 extra={"event": "event_serialize_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
             )
-            return
-        if self._deliver(payload):
-            with self._lock:
-                self.published_total += 1
-            return
-        with self._lock:
-            self.publish_failed_total += 1
+            return None
+
+    def _park(self, event: dict[str, Any], payload: str, error: str) -> None:
         key = str(event.get("event_id") or "")
         if key:
-            self._enqueue(key, payload, self._last_error)
+            self._enqueue(key, payload, error)
         _log().warning(
             "event delivery failed, parked in outbox",
             extra={
@@ -302,10 +346,87 @@ class EventPublisher:
             },
         )
 
+    def _process(self, event: dict[str, Any]) -> None:
+        payload = self._serialize(event)
+        if payload is None:
+            return
+        if self._deliver(payload):
+            with self._lock:
+                self.published_total += 1
+            return
+        with self._lock:
+            self.publish_failed_total += 1
+        self._park(event, payload, self._last_error)
+
+    def wait_idle(self, timeout: float | None = DRAIN_TIMEOUT_SECONDS) -> bool:
+        """Block until every queued event has been delivered or parked."""
+        deadline = None if timeout is None else time.time() + max(0.0, timeout)
+        with self._drained:
+            while self._queued:
+                if deadline is None:
+                    self._drained.wait()
+                    continue
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                self._drained.wait(remaining)
+        return True
+
+    def close(self) -> None:
+        """Drain and stop the worker; safe to call more than once."""
+        worker = self._worker
+        if worker is None:
+            return
+        self.wait_idle()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            try:
+                self._queue.put_nowait(None)
+                break
+            except queue.Full:
+                time.sleep(0.05)
+        worker.join(timeout=5.0)
+        self._worker = None
+
+    # ------------------------------------------------------------- publish
+
+    def publish(self, event: dict[str, Any]) -> None:
+        """Hand one event to the background sender; never blocks the crawler."""
+        if not self.enabled:
+            return
+        self._ensure_worker()
+        with self._drained:
+            self._queued += 1
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            # The worker is behind (or Redis is slow): park straight into the
+            # outbox rather than making the crawl wait for queue space.
+            with self._drained:
+                self._queued -= 1
+                if not self._queued:
+                    self._drained.notify_all()
+            payload = self._serialize(event)
+            if payload is None:
+                return
+            with self._lock:
+                self.publish_failed_total += 1
+                self._last_error = f"queue full ({QUEUE_MAXSIZE})"
+            self._park(event, payload, self._last_error)
+
     def flush(self, limit: int = 100) -> int:
         """Re-deliver due outbox rows; returns how many reached the stream."""
         if not self.enabled:
             return 0
+        if not self.wait_idle():
+            _log().warning(
+                "event queue did not drain before outbox flush",
+                extra={
+                    "event": "event_queue_drain_timeout",
+                    "error_code": "QFSD-2001",
+                    "detail": {"queued": self._queued},
+                },
+            )
         delivered = 0
         try:
             with self._db() as con:
@@ -354,6 +475,7 @@ class EventPublisher:
             "enabled": self.enabled,
             "stream": STREAM_KEY,
             "redis": _redact(self.redis_url),
+            "queued": self._queued,
             "outbox_pending": 0,
             "outbox_oldest_seconds": 0,
             "published_total": self.published_total,
@@ -391,7 +513,10 @@ def get_publisher() -> EventPublisher:
 def reset_publisher() -> None:
     global _PUBLISHER
     with _PUBLISHER_LOCK:
+        old = _PUBLISHER
         _PUBLISHER = None
+    if old is not None:
+        old.close()
 
 
 def is_enabled() -> bool:
@@ -400,6 +525,10 @@ def is_enabled() -> bool:
 
 def publish(event: dict[str, Any]) -> None:
     get_publisher().publish(event)
+
+
+def wait_idle(timeout: float | None = DRAIN_TIMEOUT_SECONDS) -> bool:
+    return get_publisher().wait_idle(timeout)
 
 
 def flush_outbox(limit: int = 100) -> int:
@@ -466,6 +595,7 @@ __all__ = [
     "EventPublisher",
     "MAXLEN",
     "OUTBOX_SCHEMA",
+    "QUEUE_MAXSIZE",
     "STREAM_KEY",
     "build_event",
     "event_id",
@@ -476,4 +606,5 @@ __all__ = [
     "publish",
     "reset_publisher",
     "stats",
+    "wait_idle",
 ]
