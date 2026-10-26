@@ -12,10 +12,14 @@ requires-python = ">=3.11"
 authors = [{ name = "QuotaFuse" }]
 keywords = ["a-share", "mcp", "stock", "market-data", "tickhub"]
 classifiers = [
+  "Intended Audience :: Developers",
+  "Environment :: Console",
+  "Natural Language :: Chinese (Simplified)",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Operating System :: OS Independent",
+  "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
   "mcp>=1.9",
@@ -46,6 +50,12 @@ notes = ["pypdf>=4.0", "pdfminer.six>=20231228"]
 
 [project.scripts]
 th-cn = "tickhub_cn.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/QuotaFuse-ai/TickHub-CN"
+Repository = "https://github.com/QuotaFuse-ai/TickHub-CN"
+Releases = "https://github.com/QuotaFuse-ai/TickHub-CN/releases"
+Issues = "https://github.com/QuotaFuse-ai/TickHub-CN/issues"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
