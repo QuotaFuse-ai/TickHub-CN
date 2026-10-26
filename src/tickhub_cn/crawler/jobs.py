@@ -28,7 +28,7 @@ from .store import get_archive, item_key
 # are registered alongside them but run on their own crons, so ``all`` stays the
 # announcement-oriented round it always was.
 DEFAULT_TASKS = ("announcements", "reports", "risks", "northbound")
-MARKET_TASKS = ("financials",)
+MARKET_TASKS = ("financials", "kline")
 TASKS = DEFAULT_TASKS + MARKET_TASKS
 DEFAULT_INDEX = "000300"
 DEDUPE_TTL = 7 * 24 * 3600
@@ -36,6 +36,8 @@ PAGE_LIMIT = 50
 NORTHBOUND_BACKFILL_DAYS = 60
 FINANCIAL_STATEMENTS = ("balance", "income", "cashflow")
 FINANCIAL_PERIODS = 8
+# First phase keeps one recent window per code; the archive grows forward daily.
+KLINE_LIMIT = 120
 
 Progress = Callable[[dict[str, Any]], None]
 StopCheck = Callable[[], bool]
@@ -528,6 +530,54 @@ def crawl_financials(
     return result
 
 
+def _crawl_kline_one(code: str) -> list[dict[str, Any]]:
+    payload = _call("tencent_kline", code=code, period="daily", adjust="qfq", limit=KLINE_LIMIT)
+    return _rows(payload, "klines")
+
+
+def crawl_kline(
+    codes: Iterable[str],
+    *,
+    concurrency: int | None = None,
+    progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
+) -> TaskResult:
+    settings = get_settings()
+    archive = get_archive()
+    result = TaskResult(task="kline")
+    code_list = list(codes)
+    cancelled = False
+
+    with ThreadPoolExecutor(max_workers=max(1, int(concurrency or settings.offline_crawler_concurrency or 1))) as pool:
+        futures = {pool.submit(_crawl_kline_one, code): code for code in code_list}
+        for future in as_completed(futures):
+            if should_stop is not None and should_stop():
+                cancelled = True
+                for pending in futures:
+                    pending.cancel()
+                break
+            code = futures[future]
+            try:
+                rows = future.result()
+            except Exception as exc:
+                result.failed.append(code)
+                result.errors[code] = str(exc)[:300]
+                if progress:
+                    progress({"task": "kline", "code": code, "fetched": 0, "failed": True})
+                continue
+            result.fetched += len(rows)
+            inserted = archive.insert_klines(code, rows, period="day", adjust="qfq")
+            result.inserted += inserted
+            if progress:
+                progress({"task": "kline", "code": code, "fetched": len(rows), "inserted": inserted})
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
+    elif result.failed:
+        result.status = "partial" if result.inserted or result.fetched else "failed"
+    return result
+
+
 _HEARTBEAT_STATUS = {
     "ok": "ok",
     "empty": "ok",
@@ -576,8 +626,8 @@ def run_task(
     """Run one crawl task.
 
     ``all`` keeps the announcement-oriented round (announcements / reports /
-    risks / northbound); ``financials`` runs on its own cron. ``should_stop`` is
-    polled between codes and between sub-tasks. A
+    risks / northbound); ``financials`` / ``kline`` run on their own crons.
+    ``should_stop`` is polled between codes and between sub-tasks. A
     cancelled run keeps whatever already landed in the archive, skips the
     remaining sub-tasks, and reports ``status="cancelled"`` with
     ``detail["cancelled"]``.
@@ -632,6 +682,11 @@ def run_task(
         if "financials" in plan and not cancelled and not stop():
             results.append(
                 crawl_financials(watchlist, concurrency=concurrency, progress=progress, should_stop=should_stop)
+            )
+            cancelled = results[-1].status == "cancelled"
+        if "kline" in plan and not cancelled and not stop():
+            results.append(
+                crawl_kline(watchlist, concurrency=concurrency, progress=progress, should_stop=should_stop)
             )
             cancelled = results[-1].status == "cancelled"
     except Exception as exc:
@@ -711,6 +766,7 @@ def crawl_status() -> dict[str, Any]:
         "northbound_cron": settings.offline_crawler_northbound_cron,
         "financials_cron": settings.offline_crawler_financials_cron,
         "financials_season_cron": settings.offline_crawler_financials_season_cron,
+        "kline_cron": settings.offline_crawler_kline_cron,
         "concurrency": settings.offline_crawler_concurrency,
         "watchlist": len(configured) or f"index:{DEFAULT_INDEX}",
         "market_watchlist": len(configured),
@@ -746,6 +802,7 @@ __all__ = [
     "archive_announcements",
     "crawl_announcements",
     "crawl_financials",
+    "crawl_kline",
     "crawl_northbound",
     "crawl_reports",
     "crawl_risks",

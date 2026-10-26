@@ -347,11 +347,11 @@ def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, 
     )
 
 
-# ------------------------------------------------- T-102 financial events
+# --------------------------------------------------- T-102 market events
 #
-# Financials became an archive writer in T-102. Event ids follow the same
-# provider|data_type|symbol|biz_key recipe as the four original types, so a
-# re-run that inserts nothing publishes nothing.
+# Financials and K-line became archive writers in T-102. Event ids follow the
+# same provider|data_type|symbol|biz_key recipe as the four original types, so
+# a re-run that inserts nothing publishes nothing.
 
 _REPORT_TYPES = {3: "Q1", 6: "H1", 9: "Q3", 12: "Annual"}
 _CHECK_QUALITY = {"pass": "normal", "warn": "suspicious", "fail": "bad", "skip": "suspicious"}
@@ -397,6 +397,42 @@ def _financial_event(
         event_time=report_date,
         content={"structured_fields": fields, "quality_metrics": metrics},
         source_info={"provider": "eastmoney"},
+    )
+
+
+def _kline_fields(row: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "trade_date": str(row.get("trade_date") or row.get("date") or "")[:10],
+    }
+    for name in ("open", "high", "low", "close", "amount"):
+        value = _amount(row.get(name))
+        if value is not None:
+            fields[name] = value
+    volume = row.get("volume")
+    if volume is not None:
+        try:
+            fields["volume"] = str(int(float(volume)))
+        except (TypeError, ValueError):
+            fields["volume"] = str(volume)
+    return fields
+
+
+def _kline_event(code: str, row: dict[str, Any], *, period: str, adjust: str) -> dict[str, Any]:
+    fields = _kline_fields(row)
+    fields["period"] = period
+    fields["adjust"] = adjust
+    return event_publisher.build_event(
+        provider="tencent",
+        data_type="kline",
+        symbol=code,
+        market="CN",
+        biz_key=f"{fields['trade_date']}|{period}|{adjust}",
+        event_time=fields["trade_date"],
+        content={
+            "structured_fields": fields,
+            "quality_metrics": {"confidence": "high", "quality_status": "normal"},
+        },
+        source_info={"provider": "tencent"},
     )
 
 
@@ -711,6 +747,71 @@ class Archive:
                 _log_event_error(exc)
         return inserted
 
+    def insert_klines(
+        self,
+        code: str,
+        rows: list[dict[str, Any]],
+        *,
+        period: str = "day",
+        adjust: str = "qfq",
+        source: str = "tencent",
+    ) -> int:
+        inserted = 0
+        stamp = _now()
+        records: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            trade_date = str(row.get("trade_date") or row.get("date") or "")[:10]
+            if not trade_date or trade_date in seen:
+                continue
+            seen.add(trade_date)
+            records.append((trade_date, row))
+        publishing = bool(records) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any]]] = []
+        with self._lock, self.connect() as con:
+            existing: set[str] = set()
+            if publishing:
+                marks = ",".join("?" for _ in records)
+                existing = {
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT trade_date FROM kline WHERE code=? AND period=? AND adjust=?"
+                        f" AND trade_date IN ({marks})",
+                        [code, period, adjust, *(r[0] for r in records)],
+                    )
+                }
+            for trade_date, row in records:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO kline"
+                    " (code, period, adjust, trade_date, open, high, low, close, volume, amount, payload, crawl_time)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        code,
+                        period,
+                        adjust,
+                        trade_date,
+                        row.get("open"),
+                        row.get("high"),
+                        row.get("low"),
+                        row.get("close"),
+                        row.get("volume"),
+                        row.get("amount"),
+                        json.dumps(row, ensure_ascii=False, default=str),
+                        stamp,
+                    ),
+                )
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and trade_date not in existing:
+                    fresh.append((trade_date, row))
+        for trade_date, row in fresh:
+            try:
+                event_publisher.publish(_kline_event(code, row, period=period, adjust=adjust))
+            except Exception as exc:
+                _log_event_error(exc)
+        return inserted
+
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:
         with self._lock, self.connect() as con:
             cur = con.execute(
@@ -754,6 +855,7 @@ class Archive:
             "crawl_task",
             "northbound_flow",
             "financial_report",
+            "kline",
         }
         if table not in allowed:
             raise ValueError(f"unsupported archive table: {table}")
@@ -798,6 +900,9 @@ class Archive:
     def financial_reports(self, code: str = "", limit: int = 50) -> list[dict[str, Any]]:
         return self.query("financial_report", code=code, limit=limit, order="report_date")
 
+    def klines(self, code: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        return self.query("kline", code=code, limit=limit, order="trade_date")
+
     def tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.query("crawl_task", limit=limit, order="started_at")
 
@@ -819,6 +924,7 @@ class Archive:
             "risk_event",
             "northbound_flow",
             "financial_report",
+            "kline",
             "crawl_task",
         )
         out: dict[str, Any] = {"path": str(self.path), "size_kb": 0}
