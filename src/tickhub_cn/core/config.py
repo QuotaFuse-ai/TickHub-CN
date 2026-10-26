@@ -88,6 +88,13 @@ class Settings:
     offline_crawler_watchlist: str = ""
     offline_crawler_max_codes: int = 50
     offline_crawler_run_on_start: bool = False
+    # T-102 market collectors own crons so a slow financial sweep never queues
+    # behind the nightly announcement round. Financials are weekly outside the
+    # reporting season and daily (Mon-Fri) in Jan/Apr/Jul/Aug/Oct.
+    offline_crawler_financials_cron: str = "0 18 * * 6"
+    offline_crawler_financials_season_cron: str = "0 18 * 1,4,7,8,10 1-5"
+    offline_crawler_kline_cron: str = "15 15 * * 1-5"
+    offline_crawler_quote_cron: str = "10 15 * * 1-5"
     archive_dir: str = "./var/archive"
     archive_db_path: str = "./var/archive/tickhub.db"
 
@@ -175,6 +182,12 @@ class Settings:
             offline_crawler_watchlist=g("OFFLINE_CRAWLER_WATCHLIST"),
             offline_crawler_max_codes=_int(g("OFFLINE_CRAWLER_MAX_CODES"), 50),
             offline_crawler_run_on_start=_bool(g("OFFLINE_CRAWLER_RUN_ON_START"), False),
+            offline_crawler_financials_cron=g("OFFLINE_CRAWLER_FINANCIALS_CRON", "0 18 * * 6"),
+            offline_crawler_financials_season_cron=g(
+                "OFFLINE_CRAWLER_FINANCIALS_SEASON_CRON", "0 18 * 1,4,7,8,10 1-5"
+            ),
+            offline_crawler_kline_cron=g("OFFLINE_CRAWLER_KLINE_CRON", "15 15 * * 1-5"),
+            offline_crawler_quote_cron=g("OFFLINE_CRAWLER_QUOTE_CRON", "10 15 * * 1-5"),
             archive_dir=g("ARCHIVE_DIR", "./var/archive"),
             archive_db_path=g("ARCHIVE_DB_PATH", "./var/archive/tickhub.db"),
             event_publish_enable=_bool(g("EVENT_PUBLISH_ENABLE"), False),

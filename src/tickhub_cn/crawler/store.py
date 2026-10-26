@@ -347,6 +347,59 @@ def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, 
     )
 
 
+# ------------------------------------------------- T-102 financial events
+#
+# Financials became an archive writer in T-102. Event ids follow the same
+# provider|data_type|symbol|biz_key recipe as the four original types, so a
+# re-run that inserts nothing publishes nothing.
+
+_REPORT_TYPES = {3: "Q1", 6: "H1", 9: "Q3", 12: "Annual"}
+_CHECK_QUALITY = {"pass": "normal", "warn": "suspicious", "fail": "bad", "skip": "suspicious"}
+
+
+def _report_type(report_date: str) -> str:
+    try:
+        return _REPORT_TYPES.get(int(report_date[5:7]), "")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _financial_event(
+    statement: str, row: dict[str, Any], *, code: str, report_date: str, check: dict[str, Any] | None
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {"report_date": report_date, "statement": statement}
+    report_type = _report_type(report_date)
+    if report_type:
+        fields["report_type"] = report_type
+    revenue = _amount(row.get("revenue"))
+    if revenue is not None:
+        fields["amount_revenue"] = revenue
+    profit = row.get("net_profit")
+    if profit is None:
+        profit = row.get("parent_net_profit")
+    amount = _amount(profit)
+    if amount is not None:
+        fields["amount_net_profit"] = amount
+    check = check or {}
+    status = str(check.get("status") or "skip")
+    metrics: dict[str, Any] = {
+        "confidence": "high",
+        "quality_status": _CHECK_QUALITY.get(status, "suspicious"),
+    }
+    if check:
+        metrics["balance_check_result"] = check
+    return event_publisher.build_event(
+        provider="eastmoney",
+        data_type="financial",
+        symbol=code,
+        market="CN",
+        biz_key=f"{report_date}|{statement}",
+        event_time=report_date,
+        content={"structured_fields": fields, "quality_metrics": metrics},
+        source_info={"provider": "eastmoney"},
+    )
+
+
 class Archive:
     def __init__(self, path: str | Path | None = None) -> None:
         settings = get_settings()
@@ -601,6 +654,63 @@ class Archive:
                 _log_event_error(exc)
         return inserted
 
+    def insert_financial_reports(
+        self,
+        code: str,
+        statement: str,
+        rows: list[dict[str, Any]],
+        *,
+        checks: dict[str, dict[str, Any]] | None = None,
+        source: str = "eastmoney",
+    ) -> int:
+        """Archive one statement; ``checks`` maps report_date → crosscheck result."""
+        inserted = 0
+        stamp = _now()
+        checks = checks or {}
+        records: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            report_date = str(row.get("report_date") or row.get("reportdate") or "")[:10]
+            if not report_date or report_date in seen:
+                continue
+            seen.add(report_date)
+            records.append((report_date, row))
+        publishing = bool(records) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any]]] = []
+        with self._lock, self.connect() as con:
+            existing: set[str] = set()
+            if publishing:
+                marks = ",".join("?" for _ in records)
+                existing = {
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT report_date FROM financial_report WHERE code=? AND statement=?"
+                        f" AND report_date IN ({marks})",
+                        [code, statement, *(r[0] for r in records)],
+                    )
+                }
+            for report_date, row in records:
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO financial_report (code, report_date, statement, payload, crawl_time)"
+                    " VALUES (?,?,?,?,?)",
+                    (code, report_date, statement, json.dumps(row, ensure_ascii=False, default=str), stamp),
+                )
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and report_date not in existing:
+                    fresh.append((report_date, row))
+        for report_date, row in fresh:
+            try:
+                event_publisher.publish(
+                    _financial_event(
+                        statement, row, code=code, report_date=report_date, check=checks.get(report_date)
+                    )
+                )
+            except Exception as exc:
+                _log_event_error(exc)
+        return inserted
+
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:
         with self._lock, self.connect() as con:
             cur = con.execute(
@@ -637,7 +747,14 @@ class Archive:
     # ------------------------------------------------------------------ reads
 
     def query(self, table: str, *, code: str = "", limit: int = 50, order: str = "crawl_time") -> list[dict[str, Any]]:
-        allowed = {"announcement", "research_report", "risk_event", "crawl_task", "northbound_flow"}
+        allowed = {
+            "announcement",
+            "research_report",
+            "risk_event",
+            "crawl_task",
+            "northbound_flow",
+            "financial_report",
+        }
         if table not in allowed:
             raise ValueError(f"unsupported archive table: {table}")
         sql = f"SELECT * FROM {table}"
@@ -678,6 +795,9 @@ class Archive:
         with self.connect() as con:
             return [dict(r) for r in con.execute(sql, params).fetchall()]
 
+    def financial_reports(self, code: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        return self.query("financial_report", code=code, limit=limit, order="report_date")
+
     def tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.query("crawl_task", limit=limit, order="started_at")
 
@@ -693,7 +813,14 @@ class Archive:
         return dict(row) if row else None
 
     def stats(self) -> dict[str, Any]:
-        tables = ("announcement", "research_report", "risk_event", "northbound_flow", "crawl_task")
+        tables = (
+            "announcement",
+            "research_report",
+            "risk_event",
+            "northbound_flow",
+            "financial_report",
+            "crawl_task",
+        )
         out: dict[str, Any] = {"path": str(self.path), "size_kb": 0}
         try:
             out["size_kb"] = round(self.path.stat().st_size / 1024, 1)

@@ -20,14 +20,22 @@ from ..core.config import get_settings
 from ..datasources.util import last_trading_day, now_shanghai
 from ..logging.setup import get_logger
 from ..risk.events import classify_announcement
+from ..validation.financial import crosscheck, normalize_report
 from . import event_publisher
 from .store import get_archive, item_key
 
-TASKS = ("announcements", "reports", "risks", "northbound")
+# The four T-101 tasks keep their nightly ``all`` round. T-102 market collectors
+# are registered alongside them but run on their own crons, so ``all`` stays the
+# announcement-oriented round it always was.
+DEFAULT_TASKS = ("announcements", "reports", "risks", "northbound")
+MARKET_TASKS = ("financials",)
+TASKS = DEFAULT_TASKS + MARKET_TASKS
 DEFAULT_INDEX = "000300"
 DEDUPE_TTL = 7 * 24 * 3600
 PAGE_LIMIT = 50
 NORTHBOUND_BACKFILL_DAYS = 60
+FINANCIAL_STATEMENTS = ("balance", "income", "cashflow")
+FINANCIAL_PERIODS = 8
 
 Progress = Callable[[dict[str, Any]], None]
 StopCheck = Callable[[], bool]
@@ -101,6 +109,28 @@ def resolve_watchlist(codes: Iterable[str] | str | None = None, *, limit: int | 
             )
             items = []
 
+    seen: list[str] = []
+    for item in items:
+        code = str(item).strip()
+        if code and code not in seen:
+            seen.append(code)
+    return seen[:limit]
+
+
+def resolve_market_watchlist(codes: Iterable[str] | str | None = None, *, limit: int | None = None) -> list[str]:
+    """Explicit codes, then the env watchlist — never the index.
+
+    T-102 only covers the 自选池 in its first phase; sweeping all index
+    constituents would multiply three sequential statement calls per code.
+    """
+    settings = get_settings()
+    limit = max(1, int(limit or settings.offline_crawler_max_codes or 50))
+    if isinstance(codes, str):
+        items = _split_codes(codes)
+    elif codes:
+        items = list(codes)
+    else:
+        items = _split_codes(settings.offline_crawler_watchlist)
     seen: list[str] = []
     for item in items:
         code = str(item).strip()
@@ -424,6 +454,80 @@ def crawl_risks(
     return result
 
 
+def _crawl_financials_one(code: str) -> dict[str, Any]:
+    """Fetch the three statements and cross-check them per report date.
+
+    The check runs locally on rows that already arrived: ``finance_crosscheck``
+    would refetch all three statements over the network per call.
+    """
+    statements: dict[str, list[dict[str, Any]]] = {}
+    errors: list[str] = []
+    for statement in FINANCIAL_STATEMENTS:
+        try:
+            payload = _call(
+                "eastmoney_financial_report", code=code, statement=statement, periods=FINANCIAL_PERIODS
+            )
+            statements[statement] = _rows(payload, "reports")
+        except Exception as exc:
+            errors.append(f"{statement}: {exc}"[:200])
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in statements.values():
+        for row in rows:
+            day = str(row.get("report_date") or "")[:10]
+            if day:
+                merged.setdefault(day, {}).update(normalize_report(row))
+    checks = {day: crosscheck(values) for day, values in merged.items() if values}
+    return {"statements": statements, "checks": checks, "errors": errors}
+
+
+def crawl_financials(
+    codes: Iterable[str],
+    *,
+    concurrency: int | None = None,
+    progress: Progress | None = None,
+    should_stop: StopCheck | None = None,
+) -> TaskResult:
+    settings = get_settings()
+    archive = get_archive()
+    result = TaskResult(task="financials")
+    code_list = list(codes)
+    cancelled = False
+
+    with ThreadPoolExecutor(max_workers=max(1, int(concurrency or settings.offline_crawler_concurrency or 1))) as pool:
+        futures = {pool.submit(_crawl_financials_one, code): code for code in code_list}
+        for future in as_completed(futures):
+            if should_stop is not None and should_stop():
+                cancelled = True
+                for pending in futures:
+                    pending.cancel()
+                break
+            code = futures[future]
+            try:
+                data = future.result()
+            except Exception as exc:
+                result.failed.append(code)
+                result.errors[code] = str(exc)[:300]
+                if progress:
+                    progress({"task": "financials", "code": code, "fetched": 0, "failed": True})
+                continue
+            inserted = 0
+            for statement, rows in data["statements"].items():
+                result.fetched += len(rows)
+                inserted += archive.insert_financial_reports(code, statement, rows, checks=data["checks"])
+            result.inserted += inserted
+            if data["errors"]:
+                result.failed.append(code)
+                result.errors[code] = "; ".join(data["errors"])
+            if progress:
+                progress({"task": "financials", "code": code, "fetched": sum(len(r) for r in data["statements"].values()), "inserted": inserted})
+    result.detail["cancelled"] = cancelled
+    if cancelled:
+        result.status = "cancelled"
+    elif result.failed:
+        result.status = "partial" if result.inserted or result.fetched else "failed"
+    return result
+
+
 _HEARTBEAT_STATUS = {
     "ok": "ok",
     "empty": "ok",
@@ -469,22 +573,29 @@ def run_task(
     progress: Progress | None = None,
     should_stop: StopCheck | None = None,
 ) -> dict[str, Any]:
-    """Run one crawl task (``announcements`` / ``reports`` / ``risks`` / ``northbound`` / ``all``).
+    """Run one crawl task.
 
-    ``should_stop`` is polled between codes and between sub-tasks. A cancelled
-    run keeps whatever already landed in the archive, skips the remaining
-    sub-tasks, and reports ``status="cancelled"`` with ``detail["cancelled"]``.
+    ``all`` keeps the announcement-oriented round (announcements / reports /
+    risks / northbound); ``financials`` runs on its own cron. ``should_stop`` is
+    polled between codes and between sub-tasks. A
+    cancelled run keeps whatever already landed in the archive, skips the
+    remaining sub-tasks, and reports ``status="cancelled"`` with
+    ``detail["cancelled"]``.
     """
     name = (task or "all").strip().lower()
     if name != "all" and name not in TASKS:
         raise ValueError(f"unknown crawl task: {task} (expected one of {', '.join(TASKS + ('all',))})")
 
     settings = get_settings()
-    watchlist = resolve_watchlist(codes, limit=limit or settings.offline_crawler_max_codes)
+    market_only = name in MARKET_TASKS
+    if market_only:
+        watchlist = resolve_market_watchlist(codes, limit=limit or settings.offline_crawler_max_codes)
+    else:
+        watchlist = resolve_watchlist(codes, limit=limit or settings.offline_crawler_max_codes)
     archive = get_archive()
     task_id = archive.start_task(name, {"codes": len(watchlist), "days": days})
     started = now_shanghai()
-    plan = list(TASKS) if name == "all" else [name]
+    plan = list(DEFAULT_TASKS) if name == "all" else [name]
     if progress:
         progress({"phase": "start", "task": name, "codes": len(watchlist), "tasks": plan})
 
@@ -518,6 +629,11 @@ def run_task(
         if "northbound" in plan and not cancelled and not stop():
             results.append(crawl_northbound(progress=progress, should_stop=should_stop))
             cancelled = results[-1].status == "cancelled"
+        if "financials" in plan and not cancelled and not stop():
+            results.append(
+                crawl_financials(watchlist, concurrency=concurrency, progress=progress, should_stop=should_stop)
+            )
+            cancelled = results[-1].status == "cancelled"
     except Exception as exc:
         elapsed = (now_shanghai() - started).total_seconds()
         archive.finish_task(task_id, status="failed", error=str(exc), detail={"elapsed_s": round(elapsed, 1)})
@@ -547,6 +663,8 @@ def run_task(
         "cancelled": cancelled,
         "tasks": [r.as_dict() for r in results],
     }
+    if market_only and not watchlist:
+        detail["note"] = "watchlist empty; set OFFLINE_CRAWLER_WATCHLIST"
     archive.finish_task(
         task_id,
         status=status,
@@ -591,8 +709,11 @@ def crawl_status() -> dict[str, Any]:
         "enabled": settings.offline_crawler_enable,
         "cron": settings.offline_crawler_cron,
         "northbound_cron": settings.offline_crawler_northbound_cron,
+        "financials_cron": settings.offline_crawler_financials_cron,
+        "financials_season_cron": settings.offline_crawler_financials_season_cron,
         "concurrency": settings.offline_crawler_concurrency,
         "watchlist": len(configured) or f"index:{DEFAULT_INDEX}",
+        "market_watchlist": len(configured),
         "max_codes": settings.offline_crawler_max_codes,
         "archive": stats,
         "queue": {task: cache.queue_length(task) for task in TASKS},
@@ -618,14 +739,18 @@ def archive_announcements(code: str = "", limit: int = 50, *, refresh: bool = Fa
 
 __all__ = [
     "DEFAULT_INDEX",
+    "DEFAULT_TASKS",
+    "MARKET_TASKS",
     "TASKS",
     "TaskResult",
     "archive_announcements",
     "crawl_announcements",
+    "crawl_financials",
     "crawl_northbound",
     "crawl_reports",
     "crawl_risks",
     "crawl_status",
+    "resolve_market_watchlist",
     "resolve_watchlist",
     "run_task",
     "window",
