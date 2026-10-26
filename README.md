@@ -1274,7 +1274,7 @@ pytest -m live
 
 ## 文档
 
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) —— 更新记录（仓库唯一文档）
+- [CHANGELOG.md](CHANGELOG.md) —— 更新记录（仓库唯一文档）
 - [skills/tickhub-cn/SKILL.md](skills/tickhub-cn/SKILL.md) —— Agent 技能包
 
 ---
@@ -1299,7 +1299,7 @@ python scripts/gen_tool_catalog.py --format skill \
 - 新增工具写进 `src/tickhub_cn/datasources/base.py` 的注册表，描述与参数由
   `scripts/gen_tool_catalog.py` 生成引用表，CI 会比对。
 - 每个数字都必须可追溯到一次上游响应；禁止在工具里做估算或模型推断。
-- 改动数据源行为时，同步更新 `th-cn tool list` 的输出（`scripts/gen_tool_catalog.py` 重新生成）与 `docs/CHANGELOG.md`。
+- 改动数据源行为时，同步更新 `th-cn tool list` 的输出（`scripts/gen_tool_catalog.py` 重新生成）与根目录 `CHANGELOG.md`。
 
 ---
 
