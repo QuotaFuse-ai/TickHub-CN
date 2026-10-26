@@ -186,7 +186,7 @@ def _log_event_error(exc: Exception) -> None:
     )
 
 
-# DEC-0006 / DEC-0008: CN sources are personal-research level (tier C) and the
+# DEC-0006 / DEC-0009: CN sources are personal-research level (tier C) and the
 # same non-commercial declaration as US data applies, so every CN data event
 # carries both fields. Unknown/new sources default to C (fail-closed).
 CN_COMPLIANCE_TIER = "C"

@@ -177,7 +177,7 @@ def test_crawl_publishes_each_new_row_once(monkeypatch: pytest.MonkeyPatch, stre
     ids = [event["event_id"] for event in stream.events]
     assert len(ids) == len(set(ids))
 
-    # DEC-0008: every CN data event declares itself personal-research (tier C)
+    # DEC-0009: every CN data event declares itself personal-research (tier C)
     # and non-commercial; heartbeats are service signals and stay provider-only.
     for event in stream.events:
         if event["data_type"] == "heartbeat":
