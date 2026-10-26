@@ -63,6 +63,22 @@ def test_a_single_non_northbound_task_does_not_schedule_it(fake_daemon):
     assert _state()["northbound_cron"] == ""
 
 
+def test_event_tick_only_runs_with_publishing_on(fake_daemon, monkeypatch):
+    from tickhub_cn.core.config import reload_settings
+
+    assert daemon.run_daemon(force=True, run_now=False, task="all") == 0
+    assert "event_tick" not in _FakeScheduler.instances[-1].job_ids()
+
+    monkeypatch.setenv("EVENT_PUBLISH_ENABLE", "true")
+    reload_settings()
+    assert daemon.run_daemon(force=True, run_now=False, task="all") == 0
+    scheduler = _FakeScheduler.instances[-1]
+    assert scheduler.job_ids() == ["offline_crawl", "offline_crawl_northbound", "event_tick"]
+    tick = next(job for job in scheduler.jobs if job["id"] == "event_tick")
+    assert tick["trigger"] == "interval"
+    assert tick["minutes"] == 5
+
+
 def test_invalid_northbound_cron_is_reported(fake_daemon, monkeypatch):
     from tickhub_cn.core.config import reload_settings
 

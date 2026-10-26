@@ -20,6 +20,7 @@ from ..core.config import get_settings
 from ..datasources.util import last_trading_day, now_shanghai
 from ..logging.setup import get_logger
 from ..risk.events import classify_announcement
+from . import event_publisher
 from .store import get_archive, item_key
 
 TASKS = ("announcements", "reports", "risks", "northbound")
@@ -423,6 +424,41 @@ def crawl_risks(
     return result
 
 
+_HEARTBEAT_STATUS = {
+    "ok": "ok",
+    "empty": "ok",
+    "partial": "partial",
+    "cancelled": "partial",
+    "failed": "failed",
+}
+
+
+def _round_end(*, task: str, status: str, inserted: int, started: _dt.datetime) -> None:
+    """Heartbeat and outbox flush after a round (success, partial or failure)."""
+    try:
+        event_publisher.heartbeat(
+            provider="tickhub-cn",
+            market="CN",
+            run_id=f"cn-{started:%Y%m%d}-{task}",
+            status=_HEARTBEAT_STATUS.get(status, "failed"),
+            items=inserted,
+            started_at=started,
+            finished_at=now_shanghai(),
+        )
+    except Exception as exc:  # the side channel must never fail a crawl
+        _log().warning(
+            "crawl heartbeat failed",
+            extra={"event": "event_heartbeat_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
+        )
+    try:
+        event_publisher.flush_outbox()
+    except Exception as exc:
+        _log().warning(
+            "event outbox flush failed",
+            extra={"event": "event_outbox_flush_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
+        )
+
+
 def run_task(
     task: str = "all",
     *,
@@ -447,7 +483,7 @@ def run_task(
     watchlist = resolve_watchlist(codes, limit=limit or settings.offline_crawler_max_codes)
     archive = get_archive()
     task_id = archive.start_task(name, {"codes": len(watchlist), "days": days})
-    started = _dt.datetime.now()
+    started = now_shanghai()
     plan = list(TASKS) if name == "all" else [name]
     if progress:
         progress({"phase": "start", "task": name, "codes": len(watchlist), "tasks": plan})
@@ -483,12 +519,13 @@ def run_task(
             results.append(crawl_northbound(progress=progress, should_stop=should_stop))
             cancelled = results[-1].status == "cancelled"
     except Exception as exc:
-        elapsed = (_dt.datetime.now() - started).total_seconds()
+        elapsed = (now_shanghai() - started).total_seconds()
         archive.finish_task(task_id, status="failed", error=str(exc), detail={"elapsed_s": round(elapsed, 1)})
         _log().error(
             "crawl task crashed",
             extra={"event": "crawl_task_failed", "error_code": "QFSD-1001", "detail": {"task": name}},
         )
+        _round_end(task=name, status="failed", inserted=0, started=started)
         raise
 
     fetched = sum(r.fetched for r in results)
@@ -503,7 +540,7 @@ def run_task(
         status = "partial" if fetched or inserted else "failed"
     else:
         status = "ok"
-    elapsed = (_dt.datetime.now() - started).total_seconds()
+    elapsed = (now_shanghai() - started).total_seconds()
     detail = {
         "codes": len(watchlist),
         "elapsed_s": round(elapsed, 1),
@@ -526,6 +563,7 @@ def run_task(
             "detail": {"task": name, "status": status, "codes": len(watchlist), "fetched": fetched, "inserted": inserted},
         },
     )
+    _round_end(task=name, status=status, inserted=inserted, started=started)
     return {
         "task": name,
         "task_id": task_id,
@@ -558,6 +596,7 @@ def crawl_status() -> dict[str, Any]:
         "max_codes": settings.offline_crawler_max_codes,
         "archive": stats,
         "queue": {task: cache.queue_length(task) for task in TASKS},
+        "events": event_publisher.stats(),
         "last_task": archive.last_task(),
     }
 

@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import get_settings
+from ..datasources.util import now_shanghai
 from ..logging.setup import get_logger
+from . import event_publisher
 from .jobs import crawl_status, run_task
 
 _STATE_NAME = "crawler_state.json"
@@ -68,6 +70,33 @@ def _tick(task: str = "all") -> dict[str, Any]:
             extra={"event": "crawl_tick_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
         )
         raise
+
+
+def _event_tick() -> None:
+    """Drain the event outbox and report liveness between crawl rounds."""
+    try:
+        event_publisher.flush_outbox()
+    except Exception as exc:
+        _log().warning(
+            "event outbox flush failed",
+            extra={"event": "event_outbox_flush_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
+        )
+    finished = now_shanghai()
+    try:
+        event_publisher.heartbeat(
+            provider="tickhub-cn",
+            market="CN",
+            # Idle runs must not collide with the once-per-day crawl rounds.
+            run_id=f"cn-{finished:%Y%m%d}-idle-{finished:%H%M}",
+            status="ok",
+            items=0,
+            finished_at=finished,
+        )
+    except Exception as exc:
+        _log().warning(
+            "idle heartbeat failed",
+            extra={"event": "event_heartbeat_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
+        )
 
 
 def request_stop() -> None:
@@ -167,6 +196,19 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
             coalesce=True,
             max_instances=1,
             misfire_grace_time=3600,
+            replace_existing=True,
+        )
+    if settings.event_publish_enable:
+        # Only exists when the FinanceCoffer side channel is on: a disabled
+        # publisher has nothing to flush and must not add jobs to the schedule.
+        scheduler.add_job(
+            _event_tick,
+            "interval",
+            minutes=5,
+            id="event_tick",
+            name="event outbox flush / idle heartbeat",
+            coalesce=True,
+            max_instances=1,
             replace_existing=True,
         )
     should_run = settings.offline_crawler_run_on_start if run_now is None else bool(run_now)

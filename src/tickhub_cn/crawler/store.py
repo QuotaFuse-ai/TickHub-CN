@@ -7,6 +7,7 @@ Writes are idempotent so a re-run never duplicates an announcement or a report.
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 import sqlite3
@@ -18,6 +19,7 @@ from typing import Any, Iterator
 
 from ..core.config import get_settings
 from ..logging.setup import get_logger
+from . import event_publisher
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS stock_basic (
@@ -109,6 +111,242 @@ def _item_id(source: str, row: dict[str, Any], *fallback: Any) -> str:
     return f"{source}:{hashlib.sha1(blob.encode('utf-8')).hexdigest()[:20]}"
 
 
+# ------------------------------------------------------------------ events
+#
+# Archive columns keep the raw vendor values; the event envelope needs business
+# time and string amounts. Chinese sources publish in Asia/Shanghai, while a
+# date-only value ("2026-10-23") means the trading/business day itself, so it is
+# pinned to UTC midnight to keep that calendar date intact downstream.
+
+_CN_TZ = _dt.timezone(_dt.timedelta(hours=8))
+
+
+def _business_date(value: Any) -> str:
+    text = str(value or "").strip().replace("/", "-")
+    if not text:
+        return ""
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    try:
+        stamp = float(text)
+    except ValueError:
+        return ""
+    return _dt.datetime.fromtimestamp(stamp / 1000, _CN_TZ).strftime("%Y-%m-%d")
+
+
+def _business_time(value: Any) -> _dt.datetime:
+    text = str(value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    parsed: _dt.datetime | None = None
+    if text:
+        try:
+            parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00").replace("/", "-"))
+        except ValueError:
+            try:
+                parsed = _dt.datetime.fromtimestamp(float(text) / 1000, _CN_TZ)
+            except ValueError:
+                parsed = None
+    if parsed is None:
+        return _dt.datetime.now(_dt.timezone.utc)
+    if parsed.tzinfo is not None:
+        return parsed
+    # A bare date is a business day, not an instant; a time-of-day is local.
+    if parsed.hour or parsed.minute or parsed.second:
+        return parsed.replace(tzinfo=_CN_TZ)
+    return parsed.replace(tzinfo=_dt.timezone.utc)
+
+
+def _amount(value: Any) -> str | None:
+    """Contract rule: amounts travel as strings to avoid float drift."""
+    if value is None or value == "":
+        return None
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _existing_ids(con: sqlite3.Connection, table: str, ids: list[str]) -> set[str]:
+    found: set[str] = set()
+    unique = list(dict.fromkeys(ids))
+    for start in range(0, len(unique), event_publisher.IN_CHUNK):
+        chunk = unique[start : start + event_publisher.IN_CHUNK]
+        marks = ",".join("?" for _ in chunk)
+        found.update(row[0] for row in con.execute(f"SELECT item_id FROM {table} WHERE item_id IN ({marks})", chunk))
+    return found
+
+
+def _log_event_error(exc: Exception) -> None:
+    get_logger("crawler").warning(
+        "event build failed",
+        extra={"event": "event_build_failed", "error_code": "QFSD-1001", "error": str(exc)[:200]},
+    )
+
+
+def _announcement_fields(row: dict[str, Any]) -> tuple[str, str, str, Any]:
+    code = str(row.get("code") or row.get("stockCode") or "")
+    title = str(row.get("title") or row.get("announcementTitle") or "")
+    published = str(
+        row.get("publish_time") or row.get("date") or row.get("announcementTime") or row.get("NOTICE_DATE") or ""
+    )
+    # Kept raw: a missing URL stays NULL in the archive, as it always did.
+    url = row.get("url") or row.get("adjunctUrl") or row.get("pdf")
+    return code, title, published, url
+
+
+def _announcement_event(
+    source: str, item_id: str, row: dict[str, Any], *, code: str, title: str, published: str, url: Any
+) -> dict[str, Any]:
+    ann_type = str(row.get("type") or row.get("announcementTypeName") or "")
+    fields: dict[str, Any] = {"ann_type": ann_type, "publish_date": _business_date(published)}
+    if title:
+        fields["title"] = title
+    return event_publisher.build_event(
+        provider=source,
+        data_type="announcement",
+        symbol=code,
+        market="CN",
+        biz_key=item_id,
+        event_time=_business_time(published),
+        content={
+            "clean_content": title,
+            "structured_fields": fields,
+            "quality_metrics": {"confidence": "high", "quality_status": "normal"},
+        },
+        source_info={"provider": source, "crawl_url": url},
+    )
+
+
+def _report_fields(row: dict[str, Any]) -> tuple[str, str, str]:
+    code = str(row.get("code") or "")
+    title = str(row.get("title") or "")
+    published = str(row.get("publish_date") or row.get("publishTime") or "")
+    return code, title, published
+
+
+def _report_key(row: dict[str, Any], *, title: str, published: str) -> str:
+    ident = str(row.get("info_code") or row.get("infoCode") or row.get("report_id") or "")
+    if ident:
+        return ident
+    return f"{title}|{row.get('org') or row.get('institution') or ''}|{published}"
+
+
+def _report_event(
+    source: str, row: dict[str, Any], *, code: str, title: str, published: str, biz_key: str
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    ident = str(row.get("info_code") or row.get("infoCode") or row.get("report_id") or "")
+    if ident:
+        fields["report_id"] = ident
+    if title:
+        fields["title"] = title
+    for column, name in (("org", "institution"), ("analyst", "analyst"), ("rating", "rating")):
+        value = row.get(column) or row.get(name)
+        if value:
+            fields[name] = str(value)
+    target = row.get("target_price")
+    if target is not None:
+        fields["target_price"] = _amount(target)
+    publish_date = _business_date(published)
+    if publish_date:
+        fields["publish_date"] = publish_date
+    pdf = row.get("pdf") or row.get("url")
+    if pdf:
+        fields["pdf_url"] = str(pdf)
+    return event_publisher.build_event(
+        provider=source,
+        data_type="research",
+        symbol=code,
+        market="CN",
+        biz_key=biz_key,
+        event_time=_business_time(published),
+        content={
+            "structured_fields": fields,
+            "quality_metrics": {"confidence": "medium", "quality_status": "normal"},
+        },
+        source_info={"provider": source, "crawl_url": str(pdf or "")},
+    )
+
+
+def _risk_fields(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(row.get("code") or ""),
+        str(row.get("type") or ""),
+        str(row.get("date") or ""),
+        str(row.get("title") or ""),
+    )
+
+
+def _risk_event(
+    fallback_source: str, item_id: str, row: dict[str, Any], *, code: str, risk_type: str, occurred: str, title: str
+) -> dict[str, Any]:
+    provider = str(row.get("source") or fallback_source)
+    fields: dict[str, Any] = {
+        "risk_type": risk_type,
+        "occur_date": _business_date(occurred),
+        "summary": title,
+    }
+    if row.get("severity"):
+        fields["severity"] = str(row.get("severity"))
+    if row.get("label"):
+        fields["label"] = str(row.get("label"))
+    return event_publisher.build_event(
+        provider=provider,
+        data_type="risk",
+        symbol=code,
+        market="CN",
+        biz_key=f"{fields['occur_date']}|{risk_type}|{item_id}",
+        event_time=_business_time(occurred),
+        content={
+            "structured_fields": fields,
+            "quality_metrics": {"confidence": "medium", "quality_status": "normal"},
+        },
+        source_info={"provider": provider},
+    )
+
+
+def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "trade_date": day,
+        "channel": str(row.get("name") or channel),
+        "currency": "CNY",
+    }
+    net = _amount(row.get("net_inflow"))
+    if net is not None:
+        fields["net_buy_amount"] = net
+    turnover = _amount(row.get("deal_amount_wan"))
+    if turnover is not None:
+        fields["deal_amount_wan"] = turnover
+    if row.get("deal_num") is not None:
+        try:
+            fields["deal_num"] = int(row["deal_num"])
+        except (TypeError, ValueError):
+            pass
+    if row.get("quota_text"):
+        fields["quota_text"] = str(row.get("quota_text"))
+    return event_publisher.build_event(
+        # Fixed provider: the snapshot and the history backfill describe the same
+        # (trade_date, channel) fact, so both must hash to one event_id.
+        provider="eastmoney_datacenter",
+        data_type="northbound",
+        symbol=None,
+        market="CN",
+        biz_key=f"{day}|{channel}",
+        event_time=_business_time(day),
+        content={
+            "structured_fields": fields,
+            "quality_metrics": {
+                "confidence": "high" if net is not None else "medium",
+                "quality_status": "normal",
+            },
+        },
+        source_info={"provider": "eastmoney_datacenter"},
+    )
+
+
 class Archive:
     def __init__(self, path: str | Path | None = None) -> None:
         settings = get_settings()
@@ -141,37 +379,59 @@ class Archive:
     def insert_announcements(self, rows: list[dict[str, Any]], *, source: str = "cninfo") -> int:
         inserted = 0
         stamp = _now()
+        records: list[tuple[str, dict[str, Any], str, str, str, Any]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            code, title, published, url = _announcement_fields(row)
+            item_id = _item_id(source, row, code, title, published)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            records.append((item_id, row, code, title, published, url))
+        publishing = bool(records) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any], str, str, str, Any]] = []
         with self._lock, self.connect() as con:
-            for row in rows or []:
-                code = str(row.get("code") or row.get("stockCode") or "")
-                title = str(row.get("title") or row.get("announcementTitle") or "")
-                published = str(
-                    row.get("publish_time")
-                    or row.get("date")
-                    or row.get("announcementTime")
-                    or row.get("NOTICE_DATE")
-                    or ""
-                )
-                url = row.get("url") or row.get("adjunctUrl") or row.get("pdf")
-                item_id = _item_id(source, row, code, title, published)
+            existing = _existing_ids(con, "announcement", [r[0] for r in records]) if publishing else set()
+            for item_id, row, code, title, published, url in records:
                 cur = con.execute(
                     "INSERT OR IGNORE INTO announcement"
                     " (item_id, code, title, publish_time, url, source, crawl_time, payload)"
                     " VALUES (?,?,?,?,?,?,?,?)",
                     (item_id, code, title, published, url, source, stamp, json.dumps(row, ensure_ascii=False, default=str)),
                 )
-                inserted += int(cur.rowcount or 0)
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and item_id not in existing:
+                    fresh.append((item_id, row, code, title, published, url))
+        for item_id, row, code, title, published, url in fresh:
+            try:
+                event_publisher.publish(
+                    _announcement_event(
+                        source, item_id, row, code=code, title=title, published=published, url=url
+                    )
+                )
+            except Exception as exc:  # publishing is a side path, never a crawl failure
+                _log_event_error(exc)
         return inserted
 
     def insert_reports(self, rows: list[dict[str, Any]], *, source: str = "eastmoney") -> int:
         inserted = 0
         stamp = _now()
+        records: list[tuple[str, dict[str, Any], str, str, str, str]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            code, title, published = _report_fields(row)
+            item_id = _item_id(source, row, code, title, published, row.get("org"))
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            records.append((item_id, row, code, title, published, _report_key(row, title=title, published=published)))
+        publishing = bool(records) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any], str, str, str, str]] = []
         with self._lock, self.connect() as con:
-            for row in rows or []:
-                code = str(row.get("code") or "")
-                title = str(row.get("title") or "")
-                published = str(row.get("publish_date") or row.get("publishTime") or "")
-                item_id = _item_id(source, row, code, title, published, row.get("org"))
+            existing = _existing_ids(con, "research_report", [r[0] for r in records]) if publishing else set()
+            for item_id, row, code, title, published, biz_key in records:
                 cur = con.execute(
                     "INSERT OR IGNORE INTO research_report"
                     " (item_id, code, title, publish_time, org, analyst, rating, url, source, crawl_time, payload)"
@@ -190,32 +450,67 @@ class Archive:
                         json.dumps(row, ensure_ascii=False, default=str),
                     ),
                 )
-                inserted += int(cur.rowcount or 0)
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and item_id not in existing:
+                    fresh.append((item_id, row, code, title, published, biz_key))
+        for item_id, row, code, title, published, biz_key in fresh:
+            try:
+                event_publisher.publish(
+                    _report_event(source, row, code=code, title=title, published=published, biz_key=biz_key)
+                )
+            except Exception as exc:
+                _log_event_error(exc)
         return inserted
 
     def insert_risks(self, rows: list[dict[str, Any]], *, source: str = "computed") -> int:
         inserted = 0
         stamp = _now()
+        records: list[tuple[str, dict[str, Any], str, str, str, str]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            code, risk_type, occurred, title = _risk_fields(row)
+            item_id = _item_id(source, row, row.get("code"), row.get("type"), row.get("title"), row.get("date"))
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            records.append((item_id, row, code, risk_type, occurred, title))
+        publishing = bool(records) and event_publisher.is_enabled()
+        fresh: list[tuple[str, dict[str, Any], str, str, str, str]] = []
         with self._lock, self.connect() as con:
-            for row in rows or []:
-                item_id = _item_id(source, row, row.get("code"), row.get("type"), row.get("title"), row.get("date"))
+            existing = _existing_ids(con, "risk_event", [r[0] for r in records]) if publishing else set()
+            for item_id, row, code, risk_type, occurred, title in records:
                 cur = con.execute(
                     "INSERT OR IGNORE INTO risk_event"
                     " (item_id, code, type, severity, event_date, title, source, crawl_time, payload)"
                     " VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         item_id,
-                        str(row.get("code") or ""),
-                        str(row.get("type") or ""),
+                        code,
+                        risk_type,
                         str(row.get("severity") or ""),
-                        str(row.get("date") or ""),
-                        str(row.get("title") or ""),
+                        occurred,
+                        title,
                         str(row.get("source") or source),
                         stamp,
                         json.dumps(row, ensure_ascii=False, default=str),
                     ),
                 )
-                inserted += int(cur.rowcount or 0)
+                if not cur.rowcount:
+                    continue
+                inserted += 1
+                if publishing and item_id not in existing:
+                    fresh.append((item_id, row, code, risk_type, occurred, title))
+        for item_id, row, code, risk_type, occurred, title in fresh:
+            try:
+                event_publisher.publish(
+                    _risk_event(
+                        source, item_id, row, code=code, risk_type=risk_type, occurred=occurred, title=title
+                    )
+                )
+            except Exception as exc:
+                _log_event_error(exc)
         return inserted
 
     def insert_northbound(
@@ -236,6 +531,8 @@ class Archive:
         wiping the close-of-day flow (and vice versa).
         """
         inserted = 0
+        publishing = bool(rows) and event_publisher.is_enabled()
+        fresh: list[tuple[str, str, dict[str, Any]]] = []
         with self._lock, self.connect() as con:
             for row in rows or []:
                 channel = str(row.get("channel") or "")
@@ -295,6 +592,13 @@ class Archive:
                     ),
                 )
                 inserted += int(existing is None)
+                if existing is None and publishing:
+                    fresh.append((day, channel, merged))
+        for day, channel, merged in fresh:
+            try:
+                event_publisher.publish(_northbound_event(day, channel, merged))
+            except Exception as exc:
+                _log_event_error(exc)
         return inserted
 
     def start_task(self, task: str, detail: dict[str, Any] | None = None) -> int:

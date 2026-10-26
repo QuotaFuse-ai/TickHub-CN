@@ -50,15 +50,19 @@ def isolated_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("ADMIN_ENABLE", "0")
     monkeypatch.setenv("ADMIN_AUTH_TOKEN", "")
     monkeypatch.setenv("ADMIN_READONLY", "0")
+    monkeypatch.setenv("EVENT_PUBLISH_ENABLE", "0")
+    monkeypatch.setenv("FC_EVENT_REDIS_URL", "redis://127.0.0.1:6399/1")
 
     from tickhub_cn.cache.redis_cache import reset_cache
     from tickhub_cn.core.config import reload_settings
+    from tickhub_cn.crawler.event_publisher import reset_publisher
     from tickhub_cn.crawler.store import reset_archive
     from tickhub_cn.fieldmap.loader import reload_field_map
     from tickhub_cn.model_gateway import reload_gateway_config
 
     reload_settings()
     reset_cache()
+    reset_publisher()
     reset_archive()
     reload_field_map()
     reload_gateway_config()
@@ -66,6 +70,7 @@ def isolated_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         yield tmp_path
     finally:
         reset_cache()
+        reset_publisher()
         reset_archive()
         reload_settings()
         reload_field_map()

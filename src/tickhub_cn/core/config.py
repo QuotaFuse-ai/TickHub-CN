@@ -91,6 +91,13 @@ class Settings:
     archive_dir: str = "./var/archive"
     archive_db_path: str = "./var/archive/tickhub.db"
 
+    # FinanceCoffer event side-channel. Off by default: the crawler only writes
+    # the local archive until an operator opts in.
+    event_publish_enable: bool = False
+    # db 1 keeps event XADDs away from cache keys (db 0), so a cache FLUSHDB
+    # cannot wipe the stream.
+    fc_event_redis_url: str = "redis://127.0.0.1:6379/1"
+
     # proxy pool
     proxy_pool_enable: bool = False
     proxy_pool_list: str = ""
@@ -170,6 +177,8 @@ class Settings:
             offline_crawler_run_on_start=_bool(g("OFFLINE_CRAWLER_RUN_ON_START"), False),
             archive_dir=g("ARCHIVE_DIR", "./var/archive"),
             archive_db_path=g("ARCHIVE_DB_PATH", "./var/archive/tickhub.db"),
+            event_publish_enable=_bool(g("EVENT_PUBLISH_ENABLE"), False),
+            fc_event_redis_url=g("FC_EVENT_REDIS_URL", "redis://127.0.0.1:6379/1"),
             proxy_pool_enable=_bool(g("PROXY_POOL_ENABLE"), False),
             proxy_pool_list=g("PROXY_POOL_LIST"),
             proxy_pool_config_path=g("PROXY_POOL_CONFIG_PATH", "logs/proxy_pool.json"),
