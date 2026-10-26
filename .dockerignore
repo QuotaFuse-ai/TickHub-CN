@@ -1,4 +1,5 @@
 .git
+.github
 .venv
 __pycache__
 *.pyc
@@ -12,5 +13,9 @@ logs
 tests
 docs
 skills
+scripts
+.reference-a-stock-data
 *.json
-!proxy_pool.json
+*.docx
+*.txt
+*.log

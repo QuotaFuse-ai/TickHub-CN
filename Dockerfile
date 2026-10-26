@@ -4,6 +4,8 @@ ENV PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /src
 COPY pyproject.toml README.md ./
 COPY src ./src
+# pyproject's data-files entry ships web/admin/index.html, so the build needs it
+COPY web ./web
 RUN pip install --prefix=/install ".[admin]"
 
 FROM python:3.12-slim
@@ -13,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     LOG_LEVEL=info
 WORKDIR /app
 COPY --from=build /install /usr/local
-COPY field_map.toml proxy_pool.json model_gateway.toml ./
+COPY field_map.toml model_gateway.toml ./
 COPY config ./config
 COPY web ./web
 RUN useradd --create-home --uid 10001 tickhub \

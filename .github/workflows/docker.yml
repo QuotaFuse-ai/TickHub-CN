@@ -1,0 +1,65 @@
+name: Docker image (GHCR)
+
+# Manual only: pushing a commit or a tag never publishes an image.
+# The image name is ghcr.io/<owner>/<repo> in lowercase, tagged with the
+# version from pyproject.toml plus `latest`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Build platforms (arm64 doubles the build time)"
+        type: choice
+        options:
+          - linux/amd64
+          - linux/amd64,linux/arm64
+        default: linux/amd64
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name and version
+        id: meta
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$image:$version"
+            echo "$image:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $image:$version"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: ${{ inputs.platforms }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=TickHub-CN
+            org.opencontainers.image.description=TickHub-CN (A-share data hub): A-share data MCP server, CLI and local import library
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
