@@ -186,6 +186,22 @@ def _log_event_error(exc: Exception) -> None:
     )
 
 
+# DEC-0006 / DEC-0008: CN sources are personal-research level (tier C) and the
+# same non-commercial declaration as US data applies, so every CN data event
+# carries both fields. Unknown/new sources default to C (fail-closed).
+CN_COMPLIANCE_TIER = "C"
+
+
+def _source_info(provider: str, **extra: Any) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "provider": provider,
+        "compliance_tier": CN_COMPLIANCE_TIER,
+        "commercial_use": False,
+    }
+    info.update({name: value for name, value in extra.items() if value is not None and value != ""})
+    return info
+
+
 def _announcement_fields(row: dict[str, Any]) -> tuple[str, str, str, Any]:
     code = str(row.get("code") or row.get("stockCode") or "")
     title = str(row.get("title") or row.get("announcementTitle") or "")
@@ -216,7 +232,7 @@ def _announcement_event(
             "structured_fields": fields,
             "quality_metrics": {"confidence": "high", "quality_status": "normal"},
         },
-        source_info={"provider": source, "crawl_url": url},
+        source_info=_source_info(source, crawl_url=url),
     )
 
 
@@ -267,7 +283,7 @@ def _report_event(
             "structured_fields": fields,
             "quality_metrics": {"confidence": "medium", "quality_status": "normal"},
         },
-        source_info={"provider": source, "crawl_url": str(pdf or "")},
+        source_info=_source_info(source, crawl_url=str(pdf or "")),
     )
 
 
@@ -304,7 +320,7 @@ def _risk_event(
             "structured_fields": fields,
             "quality_metrics": {"confidence": "medium", "quality_status": "normal"},
         },
-        source_info={"provider": provider},
+        source_info=_source_info(provider),
     )
 
 
@@ -343,7 +359,7 @@ def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, 
                 "quality_status": "normal",
             },
         },
-        source_info={"provider": "eastmoney_datacenter"},
+        source_info=_source_info("eastmoney_datacenter"),
     )
 
 

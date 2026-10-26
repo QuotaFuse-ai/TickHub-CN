@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -40,19 +42,36 @@ class _Stream:
         return f"{len(self.events)}-0"
 
 
-@pytest.fixture
-def stream(monkeypatch: pytest.MonkeyPatch) -> _Stream:
-    """Publishing on, with a fake Redis Stream."""
+class _GatedStream(_Stream):
+    """Records payloads only after the test opens the gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def xadd(self, key: str, fields: dict[str, str], maxlen: int | None = None, approximate: bool = False) -> str:
+        self.entered.set()
+        assert self.release.wait(10)
+        return super().xadd(key, fields, maxlen, approximate)
+
+
+def _enable_publishing(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     monkeypatch.setenv("EVENT_PUBLISH_ENABLE", "true")
     from tickhub_cn.core.config import reload_settings
 
     reload_settings()
     event_publisher.reset_publisher()
-    fake = _Stream()
-
     import redis
 
     monkeypatch.setattr(redis.Redis, "from_url", staticmethod(lambda url, **kwargs: fake))
+
+
+@pytest.fixture
+def stream(monkeypatch: pytest.MonkeyPatch) -> _Stream:
+    """Publishing on, with a fake Redis Stream."""
+    fake = _Stream()
+    _enable_publishing(monkeypatch, fake)
     return fake
 
 
@@ -116,8 +135,10 @@ def test_event_time_is_business_time() -> None:
 def test_publish_xadds_the_envelope(stream: _Stream) -> None:
     event = _event()
     event_publisher.publish(event)
+    assert event_publisher.wait_idle(5) is True
     assert stream.events == [event]
     stats = event_publisher.stats()
+    assert stats["queued"] == 0
     assert stats["published_total"] == 1
     assert stats["publish_failed_total"] == 0
     assert stats["outbox_pending"] == 0
@@ -157,6 +178,7 @@ def test_heartbeat_is_one_event_per_run(stream: _Stream) -> None:
     event_publisher.heartbeat(
         provider="tickhub-cn", market="CN", run_id="cn-20261026-reports", status="ok", finished_at=finished
     )
+    assert event_publisher.wait_idle(5) is True
     assert len(stream.events) == 2
     assert [e["biz_key"] for e in stream.events] == ["cn-20261026-all", "cn-20261026-reports"]
     event = stream.events[0]
@@ -185,6 +207,7 @@ def test_outbox_parks_delivery_and_flush_sends_once(stream: _Stream, monkeypatch
     monkeypatch.setattr(redis.Redis, "from_url", staticmethod(down))
     event = _event()
     event_publisher.publish(event)
+    assert event_publisher.wait_idle(5) is True
     assert stream.events == []
     stats = event_publisher.stats()
     assert stats["outbox_pending"] == 1
@@ -200,3 +223,45 @@ def test_outbox_parks_delivery_and_flush_sends_once(stream: _Stream, monkeypatch
 
     assert event_publisher.flush_outbox() == 0
     assert stream.events == [event]
+
+
+def test_publish_hands_off_to_the_background_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    slow = _GatedStream()
+    _enable_publishing(monkeypatch, slow)
+    started = time.monotonic()
+    event_publisher.publish(_event())
+    # The crawler must not wait for XADD: the worker is still blocked inside it.
+    assert time.monotonic() - started < 1.0
+    assert slow.entered.wait(5) is True
+    assert slow.events == []
+
+    slow.release.set()
+    assert event_publisher.wait_idle(5) is True
+    assert len(slow.events) == 1
+    assert event_publisher.stats()["published_total"] == 1
+    event_publisher.reset_publisher()
+
+
+def test_full_queue_parks_events_in_the_outbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(event_publisher, "QUEUE_MAXSIZE", 1)
+    slow = _GatedStream()
+    import redis
+
+    monkeypatch.setattr(redis.Redis, "from_url", staticmethod(lambda url, **kwargs: slow))
+    publisher = event_publisher.EventPublisher(enabled=True, outbox_path=tmp_path / "outbox.db")
+    try:
+        first, second, third = (_event(biz_key=f"cninfo:A{index}") for index in (1, 2, 3))
+        publisher.publish(first)  # the worker takes it and blocks in XADD
+        assert slow.entered.wait(5) is True
+        publisher.publish(second)  # fills the single queue slot
+        started = time.monotonic()
+        publisher.publish(third)  # queue full: parked immediately, no blocking
+        assert time.monotonic() - started < 1.0
+        assert publisher.stats()["outbox_pending"] == 1
+
+        slow.release.set()
+        assert publisher.wait_idle(5) is True
+        assert [event["biz_key"] for event in slow.events] == ["cninfo:A1", "cninfo:A2"]
+        assert publisher.stats()["published_total"] == 2
+    finally:
+        publisher.close()

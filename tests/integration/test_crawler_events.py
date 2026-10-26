@@ -177,6 +177,15 @@ def test_crawl_publishes_each_new_row_once(monkeypatch: pytest.MonkeyPatch, stre
     ids = [event["event_id"] for event in stream.events]
     assert len(ids) == len(set(ids))
 
+    # DEC-0008: every CN data event declares itself personal-research (tier C)
+    # and non-commercial; heartbeats are service signals and stay provider-only.
+    for event in stream.events:
+        if event["data_type"] == "heartbeat":
+            assert "compliance_tier" not in event["source_info"]
+            continue
+        assert event["source_info"]["compliance_tier"] == "C"
+        assert event["source_info"]["commercial_use"] is False
+
     announcements = {e["content"]["structured_fields"]["title"]: e for e in grouped["announcement"]}
     assert announcements["关于回购公司股份的公告"]["source_info"]["provider"] == "cninfo"
     assert announcements["关于股东减持计划的公告"]["source_info"]["provider"] == "szse"
@@ -281,6 +290,7 @@ def test_idle_tick_flushes_the_outbox_and_reports_liveness(
         staticmethod(lambda url, **kwargs: (_ for _ in ()).throw(redis.exceptions.ConnectionError("down"))),
     )
     event_publisher.publish(parked)
+    assert event_publisher.wait_idle(5) is True
     assert event_publisher.stats()["outbox_pending"] == 1
 
     publisher = event_publisher.get_publisher()

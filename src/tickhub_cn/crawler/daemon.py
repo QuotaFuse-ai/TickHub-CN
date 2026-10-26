@@ -73,8 +73,9 @@ def _tick(task: str = "all") -> dict[str, Any]:
 
 
 def _event_tick() -> None:
-    """Drain the event outbox and report liveness between crawl rounds."""
+    """Drain the event queue and outbox, then report liveness between rounds."""
     try:
+        # Draining first keeps parked data events ahead of the idle heartbeat.
         event_publisher.flush_outbox()
     except Exception as exc:
         _log().warning(
@@ -92,6 +93,7 @@ def _event_tick() -> None:
             items=0,
             finished_at=finished,
         )
+        event_publisher.wait_idle()
     except Exception as exc:
         _log().warning(
             "idle heartbeat failed",
