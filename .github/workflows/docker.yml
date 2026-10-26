@@ -2,7 +2,9 @@ name: Docker image (GHCR)
 
 # Manual only: pushing a commit or a tag never publishes an image.
 # The image name is ghcr.io/<owner>/<repo> in lowercase, tagged with the
-# version from pyproject.toml plus `latest`.
+# version from pyproject.toml plus `latest`. A second job pulls the published
+# image, starts it and sends an MCP `initialize` request, so a green run means
+# the container actually serves /mcp.
 
 on:
   workflow_dispatch:
@@ -22,6 +24,9 @@ permissions:
 jobs:
   image:
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,3 +68,37 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  smoke:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run the published image
+        run: |
+          ref="${{ needs.image.outputs.image }}:${{ needs.image.outputs.version }}"
+          docker pull "$ref"
+          docker run -d --name tickhub-cn -p 127.0.0.1:8000:8000 "$ref"
+
+      - name: MCP initialize over Streamable HTTP
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf -o /tmp/init.txt -X POST http://127.0.0.1:8000/mcp \
+                 -H 'Content-Type: application/json' \
+                 -H 'Accept: application/json, text/event-stream' \
+                 -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'; then
+              break
+            fi
+            sleep 2
+          done
+          cat /tmp/init.txt 2>/dev/null || true
+          grep -q '"result"' /tmp/init.txt
+
+      - name: Container logs
+        if: always()
+        run: docker logs tickhub-cn 2>&1 | tail -40
