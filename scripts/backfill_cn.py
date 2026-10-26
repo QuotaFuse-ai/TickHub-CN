@@ -417,6 +417,13 @@ def _scan_table(
             assert publisher is not None
             published_before = publisher.published_total
             publisher.publish(event)
+            # publish() only enqueues; the sender is asynchronous, so wait for
+            # the verdict before touching the ledger.
+            if not publisher.wait_idle():
+                print(
+                    f"  ! {table} rowid={row['_rowid']}: sender still busy after drain timeout",
+                    file=sys.stderr,
+                )
             if publisher.published_total > published_before:
                 stats["published"] += 1
                 ledger.mark(event_id, table)
