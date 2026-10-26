@@ -2,6 +2,14 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-10-27 · 历史回填脚本（T-104）
+
+- 新增 `scripts/backfill_cn.py`：把归档库中已有的 `announcement` / `research_report` / `risk_event` / `northbound_flow` 一次性回放进 `fc:stockdata:events`。事件由 `crawler/store.py` 的同一批构造函数生成，`event_id` 与实时链路一致；仅额外补 `source_info.backfill=true`，`crawl_time` 保留归档原值（缺失时留空，不补当前时间）。
+- 归档库以只读 URI 打开，`--dry-run` 只统计、不写 outbox、不连 Redis；`--since` / `--until` 按业务日期过滤，`--batch-size` 控制分页。
+- 幂等两层：消费端按 `event_id` 去重；脚本本地记录 `event_backfill_sent`，重跑不再向 Stream 追加。投递失败与实时链路共用 `event_outbox`，脚本运行前后各补发一次，Redis 恢复后只补一次。
+- 直接投递成功会清掉此前同 ID 的滞留 outbox 行，避免后续 flush 再追加一份、只涨 `XLEN` 不涨数据。
+- 一次性脚本，不挂入守护进程，进程结束即停止；数据面结构与既有抓取行为不变。
+
 ## 2026-10-26 · 事件发布旁路（T-101）
 
 - 新增 `crawler/event_publisher.py`：把新入库的公告、研报、风险、北向记录组装为契约 v0.2 事件，写入 Redis Stream `fc:stockdata:events`（`XADD ... MAXLEN ~ 100000`）。`event_id` 由 `provider|data_type|symbol|biz_key` 的 SHA-256 决定，重复投递由消费端按 ID 去重。
