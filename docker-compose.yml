@@ -1,6 +1,7 @@
 # TickHub-CN: one container, one published port.
 #
-#   docker compose up -d
+#   docker compose pull && docker compose up -d   # published image from ghcr.io
+#   docker compose up -d --build                  # or build the Dockerfile locally
 #   curl -s http://127.0.0.1:8000/mcp -H 'Accept: application/json, text/event-stream'
 #
 # The MCP endpoint is JSON-RPC (Streamable HTTP), not REST. Redis is optional:
@@ -10,7 +11,7 @@
 services:
   tickhub-cn:
     build: .
-    image: tickhub-cn:1.0.1
+    image: ghcr.io/quotafuse-ai/tickhub-cn:1.0.1
     command: ["start-all", "--host", "0.0.0.0", "--port", "8000", "--crawler", "on"]
     ports:
       - "127.0.0.1:8000:8000"

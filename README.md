@@ -15,6 +15,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="https://pypi.org/project/tickhub-cn/"><img src="https://img.shields.io/pypi/v/tickhub-cn.svg" alt="PyPI"></a>
+  <a href="https://github.com/QuotaFuse-ai/TickHub-CN/pkgs/container/tickhub-cn"><img src="https://img.shields.io/badge/ghcr.io-tickhub--cn-2496ED?logo=docker&logoColor=white" alt="GHCR"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
   <a href="https://github.com/QuotaFuse-ai/TickHub-CN/stargazers"><img src="https://img.shields.io/github/stars/QuotaFuse-ai/TickHub-CN?style=social" alt="Stars"></a>
   <br>
@@ -131,6 +132,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 - [特性](#features)
 - [架构](#architecture)
 - [快速开始（完整安装）](#quickstart)
+- [Docker / 容器部署](#docker)
 - [接入方式（MCP / CLI / Python）](#clients)
 - [Skill 用法](#skill)
 - [数据覆盖（14 层，149 个名称）](#layers)
@@ -255,6 +257,65 @@ th-cn start-all --host 127.0.0.1 --port 8000
 
 `--crawler auto`（默认）只在 `OFFLINE_CRAWLER_ENABLE=true` 时启动爬虫子进程；
 `on` 强制启动，`off` 只跑 MCP。
+
+<a id="docker"></a>
+
+### Docker / 容器部署
+
+不装 Python 也能跑，镜像已发布到 GitHub Container Registry：
+
+```bash
+docker pull ghcr.io/quotafuse-ai/tickhub-cn:1.0.1    # 或 :latest
+
+docker run -d --name tickhub-cn \
+  -p 127.0.0.1:8000:8000 \
+  -v tickhub-var:/app/var \
+  ghcr.io/quotafuse-ai/tickhub-cn:1.0.1
+# MCP 端点：http://127.0.0.1:8000/mcp
+```
+
+镜像里 `ENTRYPOINT` 是 `th-cn`，默认 `CMD` 就是
+`start-all --host 0.0.0.0 --port 8000`；要换参数（例如同时开爬虫）在后面追加即可：
+
+```bash
+docker run -d -p 127.0.0.1:8000:8000 \
+  -e OFFLINE_CRAWLER_ENABLE=true \
+  -e OFFLINE_CRAWLER_CRON="0 2 * * *" \
+  -v tickhub-var:/app/var \
+  ghcr.io/quotafuse-ai/tickhub-cn:1.0.1 \
+  start-all --host 0.0.0.0 --port 8000 --crawler on
+```
+
+要点：
+
+| 项 | 说明 |
+| --- | --- |
+| 镜像体积 | 约 64 MB 压缩层（`python:3.12-slim`，只装 `.[admin]`） |
+| 运行用户 | 非 root，`tickhub` / uid 10001；`/app/var`、`/app/logs` 已预建并授权 |
+| 数据持久化 | 用**命名卷** `-v tickhub-var:/app/var`；若改用宿主目录 bind mount，请加 `--user $(id -u):$(id -g)`，否则非 root 用户写不进去 |
+| Redis | 可选。不设 `REDIS_URL` 就用进程内缓存（`th-cn doctor` 会报 degraded / QFSD-2001，属正常） |
+| 管理台 | **不在这个端口上**。镜像以非 root 运行、不带管理台进程；需要控制台就另起一个容器覆盖 CMD：`th-cn admin serve --host 0.0.0.0 --port 8787`，并把 8787 映射到回环地址 |
+| 代理池 | 镜像里**不含** `logs/proxy_pool.json`（凭据不进镜像）。需要代理时自行挂载文件，并用 `PROXY_POOL_CONFIG_PATH` 指向它 |
+| 配置 | `/app/field_map.toml`、`/app/model_gateway.toml`、`/app/config/` 已内置，可只读挂载覆盖 |
+
+容器编排（`docker-compose.yml`，含可选 Redis）：
+
+```bash
+docker compose pull && docker compose up -d     # 用发布的镜像
+docker compose up -d --build                    # 或本地构建
+```
+
+自己构建镜像：
+
+```bash
+docker build -t tickhub-cn:1.0.1 .
+```
+
+发布新镜像走手动触发的 workflow **Docker image (GHCR)**（`.github/workflows/docker.yml`），
+标签取 `pyproject.toml` 的版本号，同时打 `:latest`；推 tag **不会**自动发布镜像。
+
+> 注意：`start-all` 的 HTTP 传输本身**没有鉴权**，容器里默认监听 `0.0.0.0`，
+> 所以上面都写成 `-p 127.0.0.1:8000:8000`。要对外暴露，请放在带认证的反向代理之后。
 
 ---
 
