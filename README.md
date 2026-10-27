@@ -137,6 +137,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 - [Skill 用法](#skill)
 - [数据覆盖（14 层，149 个名称）](#layers)
 - [返回结构与通用参数](#envelope)
+- [与 FinanceCoffer 的数据交互](#financecoffer)
 - [使用示例](#examples)
 - [代理配置（单代理与代理池）](#proxy)
 - [缓存与降级](#cache)
@@ -826,6 +827,41 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 tier 的默认规则在 `field_map.toml` 的 `[tiers.brief]` / `[tiers.medium]` 里按工具配置，
 `"*"` 表示默认值。
+
+---
+
+<a id="financecoffer"></a>
+
+## 与 FinanceCoffer 的数据交互
+
+TickHub-CN 除了对外提供 MCP 工具，还可以把**已经采集、清洗、勾稽完成**的数据以标准事件旁路发布，供下游金融数仓 [FinanceCoffer](https://github.com/QuotaFuse-ai/FinanceCoffer) 落库与检索。事件契约（Event Contract v1）由 FinanceCoffer 仓库维护，采集端与消费端共用同一份定义。
+
+**默认关闭。** 不设 `EVENT_PUBLISH_ENABLE=true` 时，发布模块完全惰性，采集、MCP、CLI 的行为与以前完全一致。
+
+```bash
+# .env 或进程环境
+EVENT_PUBLISH_ENABLE=true
+FC_EVENT_REDIS_URL=redis://127.0.0.1:6379/1   # 默认值，务必与业务缓存分库
+```
+
+| 项 | 值 |
+| --- | --- |
+| 目标 Stream | `fc:stockdata:events` |
+| 下游消费组 | `fc-etl` |
+| 死信 Stream | `fc:stockdata:dlq` |
+| `schema_version` | `"1.0"` |
+| 保留策略 | `XADD MAXLEN ~ 100000`（Redis 需开启 AOF，否则重启丢事件） |
+| 发布范围 | 公告、研报、风险、北向等已落库的数据类型；只对新入库的行发布，补跑与重试不重复发布 |
+| 合规标记 | `compliance_tier=C`、`commercial_use=false` |
+
+设计要点：
+
+- **旁路异步，不阻塞采集**：发布在采集主链路之外执行，单条发布超时约 2 秒。Redis 不可用时事件写入本地 SQLite `event_outbox`，按 1 / 5 / 25 / 120 / 600 秒退避有界重试；**发布失败永远不会让采集任务失败**。
+- **确定性 `event_id`**：`evt_` 前缀 + 业务键哈希，同一条数据无论重发多少次都是同一个 ID，下游按 ID 幂等去重。
+- **心跳**：定时发布 `data_type=heartbeat`，只用于下游判断上游是否存活，不携带行情数据、不落 ODS。
+- **数据只出不回**：发布是单向的，下游不会回查 TickHub-CN 的 SQLite，也不共享连接。
+
+字段定义、8 种 `data_type`、失败处理与版本演进见 FinanceCoffer 仓库的 [`docs/specs/event-contract.md`](https://github.com/QuotaFuse-ai/FinanceCoffer/blob/main/docs/specs/event-contract.md)。
 
 ---
 
