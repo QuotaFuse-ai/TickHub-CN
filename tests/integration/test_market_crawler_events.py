@@ -172,6 +172,7 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     sample = financial[("600000", "2026-09-30|balance")]
     assert sample["symbol"] == "600000"
     assert sample["source_info"]["provider"] == "eastmoney"
+    assert sample["source_info"]["hub"] == "tickhub-cn"
     assert sample["event_time"] == "2026-09-30T00:00:00Z"
     fields = sample["content"]["structured_fields"]
     assert fields["report_type"] == "Q3"

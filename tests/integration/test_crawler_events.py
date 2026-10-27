@@ -185,6 +185,9 @@ def test_crawl_publishes_each_new_row_once(monkeypatch: pytest.MonkeyPatch, stre
             continue
         assert event["source_info"]["compliance_tier"] == "C"
         assert event["source_info"]["commercial_use"] is False
+        # The hub is stated explicitly; ``provider`` alone is the vendor and
+        # would force the warehouse to guess via a mapping table.
+        assert event["source_info"]["hub"] == "tickhub-cn"
 
     announcements = {e["content"]["structured_fields"]["title"]: e for e in grouped["announcement"]}
     assert announcements["关于回购公司股份的公告"]["source_info"]["provider"] == "cninfo"

@@ -196,10 +196,17 @@ def _log_event_error(exc: Exception) -> None:
 # carries both fields. Unknown/new sources default to C (fail-closed).
 CN_COMPLIANCE_TIER = "C"
 
+# The hub this process publishes for. ``provider`` names the vendor behind a
+# row (``cninfo``, ``tencent``), which the warehouse cannot turn back into a
+# source label on its own; ``source_info.hub`` states it outright so the ODS
+# ``source`` column does not depend on a vendor -> hub mapping table drifting.
+CN_HUB = "tickhub-cn"
+
 
 def _source_info(provider: str, **extra: Any) -> dict[str, Any]:
     info: dict[str, Any] = {
         "provider": provider,
+        "hub": CN_HUB,
         "compliance_tier": CN_COMPLIANCE_TIER,
         "commercial_use": False,
     }
@@ -417,7 +424,7 @@ def _financial_event(
         biz_key=f"{report_date}|{statement}",
         event_time=report_date,
         content={"structured_fields": fields, "quality_metrics": metrics},
-        source_info={"provider": "eastmoney"},
+        source_info={"provider": "eastmoney", "hub": CN_HUB},
     )
 
 
@@ -453,7 +460,7 @@ def _kline_event(code: str, row: dict[str, Any], *, period: str, adjust: str) ->
             "structured_fields": fields,
             "quality_metrics": {"confidence": "high", "quality_status": "normal"},
         },
-        source_info={"provider": "tencent"},
+        source_info={"provider": "tencent", "hub": CN_HUB},
     )
 
 
@@ -495,7 +502,7 @@ def _quote_event(
                 "quality_status": "suspicious" if row.get("is_stale") else "normal",
             },
         },
-        source_info={"provider": "tencent"},
+        source_info={"provider": "tencent", "hub": CN_HUB},
     )
 
 
