@@ -47,11 +47,15 @@ REPORTS = {
     ],
 }
 
+# 万元, the unit the tool declares: net bought of 12.3亿 / -9.9亿 / 5.6亿 and the
+# day's inbound turnover next to it. The 123456789.0 that used to sit here is 1.2
+# 万亿, which no channel has ever done in one day -- an impossible magnitude makes
+# a wrong unit look like a wrong test rather than a wrong number.
 NORTHBOUND = [
-    {"channel": "hk2sh", "name": "沪股通", "net_inflow": 123456789.0, "net_inflow_wan": 123456.0, "status": 1},
-    {"channel": "hk2sz", "name": "深股通", "net_inflow": -9876543.0, "net_inflow_wan": -9876.0, "status": 1},
-    {"channel": "sh2hk", "name": "港股通(沪)", "net_inflow": 5550000.0, "net_inflow_wan": 555.0, "status": 1},
-    {"channel": "sz2hk", "name": "港股通(深)", "net_inflow": 0.0, "net_inflow_wan": 0.0, "status": 1},
+    {"channel": "hk2sh", "name": "沪股通", "net_inflow": 123456.78, "net_inflow_wan": 15625100.0, "status": 1},
+    {"channel": "hk2sz", "name": "深股通", "net_inflow": -98765.43, "net_inflow_wan": 15692726.0, "status": 1},
+    {"channel": "sh2hk", "name": "港股通(沪)", "net_inflow": 55500.0, "net_inflow_wan": 425000.0, "status": 1},
+    {"channel": "sz2hk", "name": "港股通(深)", "net_inflow": 0.0, "net_inflow_wan": 398000.0, "status": 1},
 ]
 
 # 2026-10-23 rows enrich the snapshot above; the 2026-10-22 rows are new.
@@ -209,11 +213,14 @@ def test_crawl_publishes_each_new_row_once(monkeypatch: pytest.MonkeyPatch, stre
         "2026-10-22|hk2sz",
     }
     snapshot = northbound["2026-10-23|hk2sh"]["content"]["structured_fields"]
-    assert snapshot["net_buy_amount"] == "123456789.0000"
+    # 123456.78 万元 -> 元. The key carries no generation on purpose: this table
+    # is insert_once on (trade_date, channel), so retagging it would leave two
+    # rows of two different magnitudes for one day.
+    assert snapshot["net_buy_amount"] == "1234567800.0000"
     # The row was new when the snapshot landed; the history pass enriched the
     # archive but did not republish it, so the turnover rides on the prior day.
     prior = northbound["2026-10-22|hk2sh"]["content"]["structured_fields"]
-    assert prior["deal_amount_wan"] == "14900000.0000"
+    assert prior["deal_amount"] == "149000000000.0000"
     assert prior["deal_num"] == 8000000
 
     heartbeat = grouped["heartbeat"][0]
