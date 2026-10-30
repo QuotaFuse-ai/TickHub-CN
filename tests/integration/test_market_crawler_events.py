@@ -28,6 +28,8 @@ FINANCIALS = {
             "total_profit": 120.0,
             "income_tax": 20.0,
             "net_profit": 100.0,
+            "parent_net_profit": 98.0,
+            "deducted_net_profit": 92.0,
         },
         {
             "report_date": "2026-06-30",
@@ -166,10 +168,10 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     assert {event["market"] for event in stream.events} == {"CN"}
 
     financial = {(e["symbol"], e["biz_key"]): e for e in grouped["financial"]}
-    assert ("600000", "2026-09-30|balance") in financial
-    assert ("000001", "2026-09-30|income") in financial
-    assert ("600000", "2026-06-30|cashflow") in financial
-    sample = financial[("600000", "2026-09-30|balance")]
+    assert ("600000", "2026-09-30|balance|g2") in financial
+    assert ("000001", "2026-09-30|income|g2") in financial
+    assert ("600000", "2026-06-30|cashflow|g2") in financial
+    sample = financial[("600000", "2026-09-30|balance|g2")]
     assert sample["symbol"] == "600000"
     assert sample["source_info"]["provider"] == "eastmoney"
     assert sample["source_info"]["hub"] == "tickhub-cn"
@@ -180,9 +182,14 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     assert sample["content"]["quality_metrics"]["balance_check_result"]["status"] == "pass"
     assert sample["content"]["quality_metrics"]["quality_status"] == "normal"
 
-    income = financial[("600000", "2026-09-30|income")]["content"]["structured_fields"]
+    income = financial[("600000", "2026-09-30|income|g2")]["content"]["structured_fields"]
     assert income["amount_revenue"] == "500.0000"
     assert income["amount_net_profit"] == "100.0000"
+    assert income["amount_net_profit_deducted"] == "92.0000"
+    # The June row has no deducted line: the field stays absent, it is not filled
+    # from the parent or the reported profit.
+    june = financial[("600000", "2026-06-30|income|g2")]["content"]["structured_fields"]
+    assert "amount_net_profit_deducted" not in june
 
     bars = {e["biz_key"]: e for e in grouped["kline"]}
     assert set(bars) == {
@@ -194,14 +201,21 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     assert bar["volume"] == "900000"
 
     snapshots = {e["biz_key"]: e for e in grouped["quote"]}
-    assert set(snapshots) == {"2026-10-23|150003"}
-    snap = snapshots["2026-10-23|150003"]["content"]["structured_fields"]
+    # The "|g2" tail is the field generation: FinanceCoffer dedupes on an id that
+    # hashes only provider|data_type|symbol|biz_key, so a corrected amount re-run
+    # under the pre-generation key would be dropped as a duplicate event.
+    assert set(snapshots) == {"2026-10-23|150003|g2"}
+    assert all(key[1].endswith("|g2") for key in financial), financial
+    assert not any(key.endswith("|g2") for key in bars), bars
+    snap = snapshots["2026-10-23|150003|g2"]["content"]["structured_fields"]
     assert snap == {
         "trade_date": "2026-10-23",
         "close": "10.5000",
-        "total_market_cap": "2500.0000",
+        # 2500.0 is the vendor 亿元 figure; the event owes 元, one scaling only.
+        "total_market_cap": "250000000000.0000",
         "pe_ttm": "12.3000",
         "pb": "1.1000",
+        "pb_mrq": "1.1000",
     }
 
     archive = get_archive()
@@ -209,6 +223,8 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     assert archive.stats()["kline"] == 6
     assert archive.stats()["quote_snapshot"] == 2
     assert len(archive.financial_reports(code="600000")) == 6
+    # The archive stays a vendor mirror: 亿元 as received, never rescaled.
+    assert archive.quotes(code="600000")[0]["total_market_cap"] == 2500.0
 
     # A same-day rerun inserts nothing and adds nothing to the stream.
     streamed = len(stream.events)

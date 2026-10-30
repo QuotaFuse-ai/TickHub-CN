@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -172,6 +173,53 @@ def _amount(value: Any) -> str | None:
         return f"{float(value):.4f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+# ------------------------------------------------------------------ units
+#
+# The event contract (event-contract.md §3.4, dws-metrics.md §4.1) states every
+# amount in the basic currency unit, so a CNY market cap is 元, not 亿元. The
+# Tencent quote feed publishes position 45 in 亿元 and nothing else in the
+# pipeline knows that, so the reconciliation lives here and nowhere else: the
+# archive keeps the vendor value as received, and only the event multiplies.
+# A single ``* 1e8`` is what makes a duplicate obvious in the tests.
+_YI = Decimal("100000000")
+_FOUR_PLACES = Decimal("0.0001")
+
+#: ``event_id`` is a hash of provider|data_type|symbol|biz_key and nothing else,
+#: so FinanceCoffer cannot tell a corrected payload from a replay of the old one:
+#: the unique ``event_id`` makes it skip the row. Quote and financial events
+#: therefore carry their field generation in the business key, which lets the
+#: corrected values land as new DWD versions over the archived ones instead of
+#: being dropped as duplicates. ``g2`` = market cap in 元, ``pb_mrq`` and
+#: ``amount_net_profit_deducted`` present. Bump it only when a field's unit or
+#: meaning changes; casually bumping it re-publishes every archived day.
+_GENERATION = "g2"
+
+
+def _yuan_from_yi(value: Any) -> str | None:
+    """Scale a vendor 亿元 amount to 元, or ``None`` when it is not a number.
+
+    Decimal, never float: a large-cap market cap in 元 needs 13+ integer digits,
+    and a double rounds away the decimals the contract promises to keep.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return str((Decimal(str(value)) * _YI).quantize(_FOUR_PLACES))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _positive_amount(value: Any) -> str | None:
+    """A ratio the consumer can divide by: numeric and strictly above zero."""
+    if value is None or value == "":
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return str(number.quantize(_FOUR_PLACES)) if number > 0 else None
 
 
 def _existing_ids(con: sqlite3.Connection, table: str, ids: list[str]) -> set[str]:
@@ -408,6 +456,13 @@ def _financial_event(
     amount = _amount(profit)
     if amount is not None:
         fields["amount_net_profit"] = amount
+    # Year-to-date deducted profit, straight from the income statement in 元.
+    # Deliberately not defaulted from ``amount_net_profit``: the two differ
+    # whenever non-recurring items exist, and the reference basis reads this
+    # one, so a substitute would silently restate the valuation.
+    deducted = _amount(row.get("deducted_net_profit"))
+    if deducted is not None:
+        fields["amount_net_profit_deducted"] = deducted
     check = check or {}
     status = str(check.get("status") or "skip")
     metrics: dict[str, Any] = {
@@ -421,7 +476,7 @@ def _financial_event(
         data_type="financial",
         symbol=code,
         market="CN",
-        biz_key=f"{report_date}|{statement}",
+        biz_key=f"{report_date}|{statement}|{_GENERATION}",
         event_time=report_date,
         content={"structured_fields": fields, "quality_metrics": metrics},
         source_info={"provider": "eastmoney", "hub": CN_HUB},
@@ -479,15 +534,25 @@ def _quote_event(
     code: str, row: dict[str, Any], *, trade_date: str, stamp: _dt.datetime | None
 ) -> dict[str, Any]:
     day = stamp.strftime("%Y-%m-%d") if stamp else trade_date
-    biz = f"{day}|{stamp.strftime('%H%M%S') if stamp else day}"
+    biz = f"{day}|{stamp.strftime('%H%M%S') if stamp else day}|{_GENERATION}"
     fields: dict[str, Any] = {"trade_date": day}
     close = _amount(row.get("price") if row.get("price") is not None else row.get("close"))
     if close is not None:
         fields["close"] = close
-    for key, name in (("total_market_cap", "total_market_cap"), ("pe", "pe_ttm"), ("pb", "pb")):
+    cap = _yuan_from_yi(row.get("total_market_cap"))
+    if cap is not None:
+        fields["total_market_cap"] = cap
+    for key, name in (("pe", "pe_ttm"), ("pb", "pb")):
         value = _amount(row.get(key))
         if value is not None:
             fields[name] = value
+    # The vendor PB is already its most-recent-quarter ratio, so pb_mrq is a
+    # passthrough of the same number, kept separate from ``pb`` because the
+    # reference valuation basis consumes it under that name and only when it is
+    # a usable ratio (0 and negatives are not prices).
+    pb_mrq = _positive_amount(row.get("pb"))
+    if pb_mrq is not None:
+        fields["pb_mrq"] = pb_mrq
     return event_publisher.build_event(
         provider="tencent",
         data_type="quote",

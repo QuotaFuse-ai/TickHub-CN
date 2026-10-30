@@ -2,6 +2,14 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-10-30 · 事件金额单位统一为元 + 估值字段补齐（QUOT-249）
+
+- `quote` 事件的 `total_market_cap` 改为**元**：厂商（腾讯行情第 45 位）的亿元值在 `crawler/store.py:_quote_event` 里 ×1e8 **一次**，本地 SQLite 归档继续存亿元原值。换算点唯一性由源码扫描测试守住，重复换算 / 不换算都会红。
+- `quote` 事件新增 `pb_mrq`：与 `pb` 同值的厂商 MRQ 市净率，只接受 **> 0**，0/负/缺一律不发（下游 `reference` 口径拿它当分母）。`pb` 本身口径与名字不变，兼容既有存档。
+- `financial` 事件新增 `amount_net_profit_deducted`：利润表 `DEDUCT_PARENT_NETPROFIT` 的年初至今累计，单位元；**缺失即缺席，绝不用归母 `amount_net_profit` 顶替**。
+- `quote` / `financial` 的 `biz_key` 末尾带字段代次标记 `|g2`。原因：`event_id` 只哈希 `provider|data_type|symbol|biz_key`（不含内容），下游 DWD 按它去重且 append-only（业务 UPDATE 被触发器拒绝），不带新键的修正会被当成重放丢弃。kline / 公告 / 研报 / 风险 / 北向的键不变。
+- 影响范围：仅事件旁路（`EVENT_PUBLISH_ENABLE=true` 时）；采集、MCP、CLI、归档表结构不变。切换步骤、QA 演练证据与存量处置见 `CUTOVER-UNITS.md`，逐字段刻度审计见 `UNIT-AUDIT.md`。
+
 ## 2026-10-27 · 财报 / K线 / 收盘行情采集（T-102）
 
 - 新增三个采集任务：`financials`（三张报表 + 勾稽校验，按 `report_date|statement` 去重）、`kline`（自选池日线前复权，按 `trade_date|period|adjust` 去重）、`quote`（自选池收盘快照，按 `code|trade_date` 去重）。三者均已加入 `TASKS` 与归档表，事件分别以 `financial` / `kline` / `quote` 发布到 `fc:stockdata:events`。
