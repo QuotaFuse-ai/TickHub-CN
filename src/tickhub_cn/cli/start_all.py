@@ -96,7 +96,11 @@ def _install_signals(stop: threading.Event) -> None:
             pass
 
 
-def _spawn(ctx: Any, task: str, force: bool, stop_event: Any) -> Any:
+def _spawn(ctx: Any, task: str, force: bool) -> tuple[Any, Any]:
+    # A fresh stop Event per child: a killed child leaves a stale waiter in the
+    # shared Event's semaphore accounting, after which Event.set() blocks
+    # forever waiting for a wake-up that can never come.
+    stop_event = ctx.Event()
     proc = ctx.Process(
         target=_crawler_process,
         args=(task, force, stop_event),
@@ -108,7 +112,7 @@ def _spawn(ctx: Any, task: str, force: bool, stop_event: Any) -> Any:
         "crawler child started",
         extra={"event": "crawler_child_start", "detail": {"pid": proc.pid, "task": task}},
     )
-    return proc
+    return proc, stop_event
 
 
 def _stop_child(proc: Any, stop_event: Any) -> None:
@@ -155,7 +159,11 @@ def start_all(
         )
 
     ctx = mp.get_context("spawn")
-    stop_event = ctx.Event()
+    # The signal handler may interrupt this thread inside a multiprocessing
+    # wait; re-entering the process-shared Event (a non-reentrant semaphore)
+    # from there deadlocks. Signals only touch this in-process Event, and the
+    # main loop forwards the stop to the child from a normal context.
+    stop_signal = threading.Event()
     holder: dict[str, Any] = {}
     thread = threading.Thread(target=_http_thread, args=(host, port, holder), name="mcp-http", daemon=True)
     thread.start()
@@ -165,7 +173,7 @@ def start_all(
             "MCP HTTP server failed to start",
             extra={"error_code": "QFSD-9003", "detail": {"host": host, "port": port, "error": holder.get("error")}},
         )
-        _stop_child(None, stop_event)
+        _stop_child(None, None)
         return 3
 
     log.info(
@@ -176,13 +184,13 @@ def start_all(
         },
     )
 
-    child = _spawn(ctx, task, force_crawler, stop_event) if run_crawler else None
-    _install_signals(stop_event)
+    child, child_stop = _spawn(ctx, task, force_crawler) if run_crawler else (None, None)
+    _install_signals(stop_signal)
     crashes: collections.deque[float] = collections.deque()
     degraded = False
 
     try:
-        while not stop_event.wait(1.0):
+        while not stop_signal.wait(1.0):
             if child is None or child.is_alive():
                 continue
             code = child.exitcode
@@ -217,9 +225,9 @@ def start_all(
                     "detail": {"exitcode": code, "restart": len(crashes), "window_s": CRASH_WINDOW_S},
                 },
             )
-            child = _spawn(ctx, task, force_crawler, stop_event)
+            child, child_stop = _spawn(ctx, task, force_crawler)
     finally:
-        _stop_child(child, stop_event)
+        _stop_child(child, child_stop)
         server = holder.get("server")
         if server is not None:
             server.should_exit = True

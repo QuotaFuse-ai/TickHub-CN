@@ -133,7 +133,8 @@ def run_daemon(*, force: bool = False, run_now: bool | None = None, task: str = 
     global _scheduler
 
     settings = get_settings()
-    _stop.clear()
+    # Do not clear _stop here: a supervising parent may have asked us to stop
+    # while this process was still booting, and that request must be honoured.
     if not settings.offline_crawler_enable and not force:
         _log().warning(
             "offline crawler disabled",
