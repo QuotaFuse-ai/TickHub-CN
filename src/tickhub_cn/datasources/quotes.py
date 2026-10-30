@@ -71,6 +71,10 @@ def _parse_qt_line(line: str) -> dict[str, Any] | None:
         "turnover_rate": to_float(parts[38]),
         "pe": to_float(parts[39]),
         "amplitude": to_float(parts[43]),
+        # Vendor units, kept as received: 37 is turnover in 万元, 44/45 are market
+        # caps in 亿元, 39/46 are ratios. Only the event layer converts
+        # (crawler/store.py:_quote_event), so anything rescaled here is
+        # multiplied twice before it reaches the warehouse.
         "float_market_cap": to_float(parts[44]),
         "total_market_cap": to_float(parts[45]),
         "pb": to_float(parts[46]) if len(parts) > 46 else None,

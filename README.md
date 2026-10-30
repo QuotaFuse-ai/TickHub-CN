@@ -863,6 +863,20 @@ FC_EVENT_REDIS_URL=redis://127.0.0.1:6379/1   # 默认值，务必与业务缓�
 
 字段定义、8 种 `data_type`、失败处理与版本演进见 FinanceCoffer 仓库的 [`docs/specs/event-contract.md`](https://github.com/QuotaFuse-ai/FinanceCoffer/blob/main/docs/specs/event-contract.md)。
 
+### 金额单位与估值字段（QUOT-249）
+
+契约（`event-contract.md` §3.4 / `dws-metrics.md` §4.1）规定事件里的金额一律是**基本货币单位**，A 股即元。腾讯行情第 45 位是**亿元**，所以差一个 1e8——这个刻度只在 `crawler/store.py:_quote_event` 里补一次，本地归档（`quote_snapshot.total_market_cap`）仍按厂商原值（亿元）存，不参与换算。
+
+| 字段 | 事件单位 | 缺失语义 |
+| --- | --- | --- |
+| `total_market_cap` | 元（厂商亿元 ×1e8，只在此处一次） | 厂商没给或不是数字 → 字段不出现在 `structured_fields` |
+| `pb` | 倍（厂商 MRQ 原值，不改名、不换算） | 同上 |
+| `pb_mrq` | 倍 | 与 `pb` 同值，但只接受 **> 0** 的比率；0/负值/缺失都不上行（下游 `reference` 口径要拿它当分母） |
+| `amount_net_profit_deducted` | 元（利润表 YTD 累计扣非归母） | 厂商没给 → 字段缺席；**绝不用 `amount_net_profit`（归母）顶替** |
+| `amount_revenue` / `amount_net_profit` | 元 | 原有口径不变 |
+
+quote 与 financial 事件的 `biz_key` 末尾带字段代次标记 `|g2`（`g2` = 市值为元 + 上表两个新字段）。原因：`event_id` 只哈希 `provider|data_type|symbol|biz_key`，不含内容，而下游 DWD 是 append-only（`BEFORE UPDATE` 触发器拒绝业务改写）并按 `event_id` 去重——不带新键的修正会被当成重放丢弃。切换与存量处置见 [`CUTOVER-UNITS.md`](CUTOVER-UNITS.md)，逐字段单位审计见 [`UNIT-AUDIT.md`](UNIT-AUDIT.md)。
+
 ---
 
 <a id="examples"></a>
