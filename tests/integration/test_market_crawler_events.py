@@ -193,12 +193,13 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
 
     bars = {e["biz_key"]: e for e in grouped["kline"]}
     assert set(bars) == {
-        f"{day}|day|qfq" for day in ("2026-10-21", "2026-10-22", "2026-10-23")
+        f"{day}|day|qfq|g2" for day in ("2026-10-21", "2026-10-22", "2026-10-23")
     }
-    bar = bars["2026-10-23|day|qfq"]["content"]["structured_fields"]
+    bar = bars["2026-10-23|day|qfq|g2"]["content"]["structured_fields"]
     assert bar["adjust"] == "qfq"
     assert bar["close"] == "10.5000"
-    assert bar["volume"] == "900000"
+    # 900000 is the vendor 手 figure; the event owes 股, one scaling only.
+    assert bar["volume"] == "90000000"
 
     snapshots = {e["biz_key"]: e for e in grouped["quote"]}
     # The "|g2" tail is the field generation: FinanceCoffer dedupes on an id that
@@ -206,7 +207,7 @@ def test_market_tasks_publish_each_new_row_once(monkeypatch: pytest.MonkeyPatch,
     # under the pre-generation key would be dropped as a duplicate event.
     assert set(snapshots) == {"2026-10-23|150003|g2"}
     assert all(key[1].endswith("|g2") for key in financial), financial
-    assert not any(key.endswith("|g2") for key in bars), bars
+    assert all(key.endswith("|g2") for key in bars), bars
     snap = snapshots["2026-10-23|150003|g2"]["content"]["structured_fields"]
     assert snap == {
         "trade_date": "2026-10-23",

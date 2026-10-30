@@ -116,8 +116,12 @@ def archive() -> Path:
             {
                 "channel": "hk2sh",
                 "name": "沪股通",
-                "net_inflow": 123456789.0,
-                "deal_amount_wan": 5000.0,
+                # 万元, the unit funds.py declares: 12.3亿 net bought and 1562亿
+                # turned over, both ordinary days. The 123456789.0 that used to sit
+                # here was 1.2万亿, a magnitude no northbound channel has ever done,
+                # so it hid the unit error instead of exposing it.
+                "net_inflow": 123456.78,
+                "deal_amount_wan": 15625100.0,
                 "deal_num": 10,
                 "quota_text": "充足",
             }
@@ -168,7 +172,8 @@ def test_backfill_publishes_the_archive_once(archive: Path, stream: _Stream) -> 
     first_announcement = next(e for e in stream.events if e["biz_key"] == "cninfo:A1")
     assert first_announcement["event_time"] == "2026-10-20T10:00:00Z"
     assert by_type["northbound"]["symbol"] is None
-    assert by_type["northbound"]["content"]["structured_fields"]["net_buy_amount"] == "123456789.0000"
+    # 123456.78 万元 in, 元 out -- the envelope has one money scale.
+    assert by_type["northbound"]["content"]["structured_fields"]["net_buy_amount"] == "1234567800.0000"
     assert _pending() == 0
 
 

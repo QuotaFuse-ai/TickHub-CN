@@ -186,14 +186,27 @@ def _amount(value: Any) -> str | None:
 _YI = Decimal("100000000")
 _FOUR_PLACES = Decimal("0.0001")
 
+# Northbound amounts arrive in 万元: ``funds.py`` normalises the 百万元 history
+# rows to 万元 and declares ``unit: "万元"`` in its own meta, and the CLI, the
+# archive and the skill examples all consume that. The event envelope has one
+# money scale for every data_type, so the last step is the event layer's.
+_WAN = Decimal("10000")
+
+# Tencent's K-line sends volume in 手 and an A-share lot is 100 shares; the
+# warehouse column is 股. Same rule as above: the archive mirrors the vendor.
+_LOTS = Decimal("100")
+
 #: ``event_id`` is a hash of provider|data_type|symbol|biz_key and nothing else,
 #: so FinanceCoffer cannot tell a corrected payload from a replay of the old one:
-#: the unique ``event_id`` makes it skip the row. Quote and financial events
-#: therefore carry their field generation in the business key, which lets the
-#: corrected values land as new DWD versions over the archived ones instead of
-#: being dropped as duplicates. ``g2`` = market cap in 元, ``pb_mrq`` and
-#: ``amount_net_profit_deducted`` present. Bump it only when a field's unit or
-#: meaning changes; casually bumping it re-publishes every archived day.
+#: the unique ``event_id`` makes it skip the row. Quote, financial and K-line
+#: events therefore carry their field generation in the business key, which lets
+#: the corrected values land as new DWD versions over the archived ones instead
+#: of being dropped as duplicates. ``g2`` = market cap in 元, ``pb_mrq`` and
+#: ``amount_net_profit_deducted`` present, K-line volume in 股. Bump it only when
+#: a field's unit or meaning changes; casually bumping it re-publishes every
+#: archived day. Northbound stays untagged: FinanceCoffer writes that table
+#: ``insert_once`` on ``(trade_date, channel)``, so a new key would leave two
+#: rows per day and the DWD would still keep only the first one.
 _GENERATION = "g2"
 
 
@@ -209,6 +222,35 @@ def _yuan_from_yi(value: Any) -> str | None:
         return str((Decimal(str(value)) * _YI).quantize(_FOUR_PLACES))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _yuan_from_wan(value: Any) -> str | None:
+    """Scale a vendor 万元 amount to 元, or ``None`` when it is not a number.
+
+    A blank, a placeholder dash and anything else the Decimal cannot read are
+    absent from the event, never invented as zero: a channel that reported no
+    net buy is a different fact from one that reported none at all.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return str((Decimal(str(value)) * _WAN).quantize(_FOUR_PLACES))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _shares_from_lots(value: Any) -> str | None:
+    """Scale a vendor lot count to shares, or pass unreadable text through as is.
+
+    A lot count is a whole number, so the product is one too; the string keeps
+    the contract's no-float-drift rule.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return str(int(Decimal(str(value)) * _LOTS))
+    except (InvalidOperation, ValueError):
+        return str(value)
 
 
 def _positive_amount(value: Any) -> str | None:
@@ -390,12 +432,16 @@ def _northbound_event(day: str, channel: str, row: dict[str, Any]) -> dict[str, 
         "channel": str(row.get("name") or channel),
         "currency": "CNY",
     }
-    net = _amount(row.get("net_inflow"))
+    net = _yuan_from_wan(row.get("net_inflow"))
     if net is not None:
         fields["net_buy_amount"] = net
-    turnover = _amount(row.get("deal_amount_wan"))
+    turnover = _yuan_from_wan(row.get("deal_amount_wan"))
     if turnover is not None:
-        fields["deal_amount_wan"] = turnover
+        # Renamed from deal_amount_wan: the envelope has one money scale, and a
+        # field name is the only place a unit can hide. FinanceCoffer has no
+        # consumer for either name (NorthboundFields is extra="allow" and the DWD
+        # table has no such column), so this is a free correction.
+        fields["deal_amount"] = turnover
     if row.get("deal_num") is not None:
         try:
             fields["deal_num"] = int(row["deal_num"])
@@ -491,12 +537,9 @@ def _kline_fields(row: dict[str, Any]) -> dict[str, Any]:
         value = _amount(row.get(name))
         if value is not None:
             fields[name] = value
-    volume = row.get("volume")
-    if volume is not None:
-        try:
-            fields["volume"] = str(int(float(volume)))
-        except (TypeError, ValueError):
-            fields["volume"] = str(volume)
+    shares = _shares_from_lots(row.get("volume"))
+    if shares is not None:
+        fields["volume"] = shares
     return fields
 
 
@@ -509,7 +552,11 @@ def _kline_event(code: str, row: dict[str, Any], *, period: str, adjust: str) ->
         data_type="kline",
         symbol=code,
         market="CN",
-        biz_key=f"{fields['trade_date']}|{period}|{adjust}",
+        # The generation here means volume moved from lots to shares. FinanceCoffer
+        # writes K-line rows with insert_version, so a new key lands the corrected
+        # bar as a new version; without it the identical event_id is read as a
+        # replay and the correction never reaches the warehouse.
+        biz_key=f"{fields['trade_date']}|{period}|{adjust}|{_GENERATION}",
         event_time=fields["trade_date"],
         content={
             "structured_fields": fields,
