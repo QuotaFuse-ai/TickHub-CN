@@ -63,20 +63,35 @@
 只能靠发布带正确单位的新事件。这一点决定了切换只能前进，不能倒退 —— 所以第 5 步
 的窗口与清单要先在 QA 跑一遍（本单已跑，见第 4 节）。
 
-## 4. QA 演练证据（`financecoffer_qa`）
+## 4. QA 演练证据（`financecoffer_qa_249`）
 
-脚本：本单工作目录 `qa_cutover_rehearsal.py`（只连 QA，连库前重写并断言库名）。
+按 2026-10-30 13:10 裁定：共享 `financecoffer_qa` 已被 QUOT-244 验证流程整库重建为
+**造数库**（不再是真值），本单落地复验的唯一真值来源是 `financecoffer_qa_245`
+（只读，禁 DROP/重建）。因此演练跑在**真值的私有副本**上：
+
+```
+CREATE DATABASE financecoffer_qa_249 TEMPLATE financecoffer_qa_245 OWNER fcoffer;
+```
+
+`TEMPLATE` 只读源库，不连接、不修改 `financecoffer_qa_245`；副本带着 `0013`
+（`pb_mrq`、`amount_net_profit_deducted` 是真列），所以演练能同时证明
+**单位切换**与**新字段落库**。脚本：本单工作目录 `qa_cutover_rehearsal.py`
+（库名由 `FC_QA_DB` 决定，连库前重写并断言；默认 `financecoffer_qa_249`）。
 demo 标的 `Q249DEMO`，厂商值取 2026-10-30 工商银行实录：`31185.55` 亿元、
-`pe_ttm=8.12`、年度归母 `288278000000.0000` 元。
+`pe_ttm=8.12`、`pb=1.10`、年度归母 `288278000000.0000` 元。
 
 **BEFORE**（`dwd.stock_quote_snapshot`，按 provider 分桶）
 
 ```
-{'provider': 'quot244', 'rows': 1, 'non_null': 1, 'minimum': 2000000.0000, 'maximum': 2000000.0000, 'yi_scale': 1, 'yuan_scale': 0}
+{'provider': 'eastmoney', 'rows': 1, 'non_null': 1, 'minimum': 210000000000.0000, 'maximum': 210000000000.0000, 'yi_scale': 0, 'yuan_scale': 1}
 {'provider': 'tencent', 'rows': 2, 'non_null': 2, 'minimum': 31185.5500,   'maximum': 31185.5500,   'yi_scale': 2, 'yuan_scale': 0}
 Q249DEMO 2026-10-28 v1 [亿元代] cap=31185.5500 implied_pe=1.1E-7  implied/vendor=0.000000
 Q249DEMO 2026-10-30 v1 [亿元代] cap=31185.5500 implied_pe=1.1E-7  implied/vendor=0.000000
 ```
+
+真值侧基线：库里唯一的存量 quote 行是 eastmoney 的 `210000000000.0000`（**元代**，
+`yi_scale=0`）—— 本单要修的亿刻度行在这份真值里是 0 条，问题只在默认应用库
+`financecoffer` 与造数库上出现（见第 5 节）。
 
 `implied/vendor = 0` 就是下游 `reference`/`snapshot` 口径全断的形态：市值(亿) ÷
 利润(元) 差 8 个数量级，PE 落在 1e-7 —— 只改一半（改了单位没改键，或改了键没改单位）
@@ -102,10 +117,22 @@ replayed the pre-cutover event; rows inserted: 0
 
 ```
 rows inserted by the corrected event: 1
- v1 cap=31185.5500
- v2 cap=3118555000000.0000
+ v1 cap=31185.5500          pb_mrq=None
+ v2 cap=3118555000000.0000  pb_mrq=1.1000
 second pass rows inserted: 0        -- 同一条修正事件再灌一次，幂等
 ```
+
+同一招在财务侧（`dwd.stock_financial_snapshot`，真值副本里
+`amount_net_profit_deducted` 已是真列）：
+
+```
+legacy biz_key '2026-09-30|income'     -> event_id evt_a2f92c0c2d33…
+new biz_key    '2026-09-30|income|g2'  -> event_id evt_fe41e0731022…
+ v1 归母=285640000000.0000 扣非=None              event_id=evt_a2f92c0c2d3399
+ v2 归母=285640000000.0000 扣非=284926000000.0000 差额=714000000.0000
+```
+
+差额 7.14 亿正是「不得用归母顶替」的量化理由：顶替会把扣非说成比实际多 7.14 亿。
 
 **AFTER**
 
@@ -130,8 +157,15 @@ Q249DEMO 2026-10-28 latest total_market_cap=31185.5500 [亿元代（未修）]
 Q249DEMO 2026-10-30 latest total_market_cap=3118555000000.0000 [元代]
 ```
 
-演练只在 `financecoffer_qa` 做，收尾删掉 demo 标的（`rows left: 0`），
-备份表 `dwd.q249_unit_backup` 留在 QA 供复核。生产库全程只读。
+演练只在私有库 `financecoffer_qa_249` 做，收尾按 demo 标的删除（
+`quote rows left: 0` / `financial rows left: 0`），中间产物备份表
+`dwd.q249_unit_backup` 也已 DROP；复查后该库回到副本初始状态
+（quote 1 行、financial 16 行，`q249*` 表 0 张）。真值与造数两库全程只读复核：
+
+```
+financecoffer_qa_245  quote=1 financial=16 q249_tables=0
+financecoffer_qa(造数) quote=1 financial=3  q249_tables=0   -- 本单早期误跑的 dwd.q249_unit_backup 已 DROP
+```
 
 ## 5. 生产存量规模（只读取证）
 
@@ -151,6 +185,18 @@ ods_quote_events: ('CN','manual','yi-scale (亿元)',1,'2026-10-27|161456')
 ODS 侧 1 条带市值的 CN quote 事件是 `source='manual'` 的手工投递。生产环境执行时同一
 条查询给出各自的行数与日期跨度，先贴数再动手。
 
+同一个脚本跑真值库 `financecoffer_qa_245`（仍只读）：
+
+```
+quote_rows: 1        ('eastmoney', 'base-unit (元, cutover)', 1, 2025-06-30, 2025-06-30)
+live_rows_still_yi:  -- 空：真值库里没有亿刻度的最新版本
+financial_rows: (16, with_profit=12, 2021-12-31, 2026-09-30)
+ods_quote_events: 空
+```
+
+⇒ 「亿刻度存量」在真值库里是 **0 行**，在默认应用库里是 **1 行**：修复窗口必须按
+库/市场/provider 分别取证后再定，不能按任一库的形状推全系统。
+
 ## 6. 与 QUOT-251（`0013`）的顺序
 
 FinanceCoffer 的事件模型全程 `model_config = ConfigDict(extra="allow")`
@@ -160,6 +206,16 @@ FinanceCoffer 的事件模型全程 `model_config = ConfigDict(extra="allow")`
   `raw_json`，但在 `0013` 之前**查不到列**（`dwd` 里还没这两列）。不阻塞、不报错。
 - `0013` 先上、本 PR 后发：列存在但为 null，下游 `reference` 口径继续 null。
 - `total_market_cap` 的单位切换**立即生效**，与 `0013` 无关 —— 这是本单真正的 gate。
+
+本机的库状态实测（`information_schema.columns`，全部只读），正好把两种情形都摆出来：
+
+```
+financecoffer(默认应用库，生产形状)  dwd 两表都**没有**新列        -> 「PR 先发、0013 后上」
+financecoffer_qa_245 / _249(真值)     stock_quote_snapshot.pb_mrq
+                                     stock_financial_snapshot.amount_net_profit_deducted  -> 「0013 已上」
+```
+
+所以第 4 节的落库演练是在「`0013` 已上」这一侧做的，切换 SQL 在两种库上都不需要先改表。
 
 校验 SQL（`0013` 之后跑）：
 

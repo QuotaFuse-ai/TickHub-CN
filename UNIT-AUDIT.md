@@ -86,6 +86,9 @@ QUOT-249 交付 (a)。逐个数值的「源刻度 → 事件刻度 → 是否换
 `biz_key` 末尾带代次标记 `|g2`（= 市值为元 + `pb_mrq` + `amount_net_profit_deducted`），
 修正后的事件才会作为新版本落库，而不是被当成重放丢弃。kline / announcement / research /
 risk / northbound 的键不变。切换步骤与 QA 实录见 [`CUTOVER-UNITS.md`](CUTOVER-UNITS.md)。
+证据库按 2026-10-30 13:10 裁定重定：真值库 `financecoffer_qa_245` 只读，演练跑在它的私有
+副本 `financecoffer_qa_249`（`CREATE DATABASE … TEMPLATE financecoffer_qa_245`）上，
+共享 `financecoffer_qa` 已是 QUOT-244 的造数库，不作为真值。
 
 守住这条的测试：`tests/regression/test_event_units_and_fields.py`
 （`test_fixed_quote_does_not_hash_to_the_stored_event_id`、
