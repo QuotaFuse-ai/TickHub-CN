@@ -1343,6 +1343,8 @@ python scripts/gen_tool_catalog.py --format skill \
   --out skills/tickhub-cn/references/tools.md
 ```
 
+CI 的实际 job（4 个矩阵组合 + catalog 比对）、与之一一对应的本地命令（含 Windows / POSIX venv 路径差异）以及 required checks 现状，见 [docs/CI.md](docs/CI.md)。
+
 约定：
 
 - Python ≥ 3.11；`stdout` 只输出数据，日志一律走 `stderr`。
