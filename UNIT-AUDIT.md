@@ -3,8 +3,11 @@
 QUOT-249 交付 (a)。逐个数值的「源刻度 → 事件刻度 → 是否换算 → 下游期望」，不只市值。
 刻度按 2026-10-30 的线上取证确定（取证方法见文末），不按字段名猜。
 
-契约基线：FinanceCoffer `docs/specs/event-contract.md` v0.8、`docs/specs/dws-metrics.md` §4.1
-（「金额单位：元（CNY）……不做万元/亿元换算」）。
+> 2026-10-31 QUOT-258 定稿：北向金额、K 线成交量的刻度已定，§3 / §5 的表格与 §6 的待决项
+> 按结论改写，三问的选择理由、代价与派单见 §9.2–§9.4；可直接合入 FinanceCoffer 的契约文本见 §9.5。
+
+契约基线：FinanceCoffer `docs/specs/event-contract.md` v0.8（本文件 §9.5 是其 v0.9 增量）、
+`docs/specs/dws-metrics.md` §4.1（「金额单位：元（CNY）……不做万元/亿元换算」）。
 
 ## 1. quote（provider=tencent，`crawler/store.py:_quote_event`）
 
@@ -33,7 +36,7 @@ QUOT-249 交付 (a)。逐个数值的「源刻度 → 事件刻度 → 是否换
 | 字段 | 源刻度 | 事件刻度 | 换算 | 下游期望 |
 | --- | --- | --- | --- | --- |
 | `open`/`high`/`low`/`close` | 元 | 元 | 无 | 元 |
-| `volume` | 手 | 手（整数字符串） | 无 | 契约样例 `"12345600"` 未声明手/股；**刻度待定，见 §6-2** |
+| `volume` | 手（腾讯日 K 第 6 位） | **股**（整数字符串） | **×100，只在事件层一次** | `dwd.stock_kline_daily.volume NUMERIC(24,4)`，股；1 手 = 100 股，见 §9.3 |
 | `amount` | 厂商日 K 未提供（2026-10-30 实测 `item[6]` 缺失） | 不发 | — | 契约样例为元 |
 
 ## 4. research / announcement / risk
@@ -47,20 +50,18 @@ QUOT-249 交付 (a)。逐个数值的「源刻度 → 事件刻度 → 是否换
 
 | 字段 | 源刻度 | 事件刻度 | 换算 | 下游期望 |
 | --- | --- | --- | --- | --- |
-| `net_buy_amount` | 百万元（`NET_DEAL_AMT`） | **万元**（`datasources/funds.py` ×100） | 已在数据源换算 | 契约样例 `"123456789.0000"` + `currency=CNY` ⇒ **元**，与本行不符，见 §6-1 |
-| `deal_amount_wan` | 百万元（`DEAL_AMT`） | 万元 | 已在数据源换算 | 字段名自带「万」，与事件刻度一致 |
+| `net_buy_amount` | 历史：百万元（`NET_DEAL_AMT`）；实时：万元（`dayNetAmtIn`） | **元** | 历史 ×100 → 万元，实时本就是万元（工具契约）；事件层再 ×1e4 → 元 | 契约样例 `"123456789.0000"` + `currency=CNY`，元 |
+| `deal_amount`（原 `deal_amount_wan`） | 百万元（`DEAL_AMT`） | **元** | 同上一行 | 元；字段名不再携带单位，见 §9.2 |
 | `deal_num` | 笔 | 笔 | 无 | 计数，非金额 |
 
 ## 6. 已知限制与待决项
 
-1. **北向 `net_buy_amount` 是万元，契约期望元。**本单只授权改 quote / financial 两类字段，
-   不改北向；换算点也不在事件层（在数据源层已经 ×100），因此不能顺手 ×1e4。需要产品与 FC
-   确认「净买入额」对外口径后再单独派单。
-2. **`kline.volume` 手/股未定。**腾讯给的是手，契约样例没有声明单位；FC 只存不换算。
-   与 §6-1 同为「刻度需人类确认」项。
-3. **`dwd.stock_quote_snapshot` 没有币种列**（FC `db/models/dwd.py:200-234`，`currency` 只存在于
-   `NorthboundFlow`）。本单不扩 FC 表结构，因此 A 股之外的金额事件缺少自证币种的落库位置：
-   本期 `reference` 只承诺 A 股，US/HK 走 null + 原因码，不是缺陷。
+1. ~~**北向 `net_buy_amount` 是万元，契约期望元。**~~ **已定稿（§9.2）：事件为元，数据源与
+   工具契约保持万元，换算只在事件层。**
+2. ~~**`kline.volume` 手/股未定。**~~ **已定稿（§9.3）：事件为股（1 手 = 100 股），归档与
+   工具保持厂商的手。**
+3. ~~**`dwd.stock_quote_snapshot` 没有币种列。**~~ **已定稿（§9.4）：本期不改表结构；契约约束
+   与扩表触发条件见 §9.4。**（同一张表也没有 `market` 列，这是比币种更前置的缺口。）
 4. 事件里所有金额一律**字符串**、4 位小数，全链路 `Decimal`（`float` 乘 1e8 会把大市值的
    尾数变成噪声，`NUMERIC(24,4)` 侧会当成精度损失拒绝入库）。
 
@@ -100,7 +101,9 @@ risk / northbound 的键不变。切换步骤与 QA 实录见 [`CUTOVER-UNITS.md
 `3118555000000.0000 元 ÷ 288278000000.0000 元 = 10.82`，厂商 `pe_ttm = 8.12`，比值 1.33 落在
 合理带内；不改单位时同一算式得 `1.1e-7`。
 
-## 9. 需要 FinanceCoffer 侧合入的契约增补（本单不改 FC）
+## 9. FinanceCoffer 契约增补与 QUOT-258 三问定稿
+
+### 9.1 QUOT-249 已交付字段（原草案，可合入）
 
 `event-contract.md` §3.4 与 `dws-metrics.md` §4.1 的现文本只写了「金额单位：元」，没有写清
 新字段与缺失语义。建议增补（逐字可用）：
@@ -121,5 +124,169 @@ biz_key
   provider|data_type|symbol|biz_key，DWD append-only 且按 event_id 去重，因此字段单位/口径
   变化必须体现为键变化，否则修正会被当成重放丢弃。标记是常量，不随运行时间变化。
 ```
+
+### 9.2 定稿一：北向金额统一为元
+
+**结论：事件里一律元——`net_buy_amount` 与 `deal_amount` 都是元；`datasources/funds.py` 与
+`northbound_flow` 工具契约保持万元。**
+
+为什么：
+
+1. 契约 §3.7 的样例 `"123456789.0000"` 只有按元才成立：12.3 亿元/日是北向单日净买入的正常
+   量级；按万元是 1.2 万亿元/日，超过全市场单日成交额，不可能是真的。
+2. 事件信封对所有 `data_type` 只有一个金额刻度（`dws-metrics.md` §4.1「金额单位：元，
+   不做万元/亿元换算」）。北向不是例外——一处例外就是下一次静默的 ×1e4。
+3. 数据源不能改：`funds.py` 的出参 meta 写着 `unit: "万元"`，CLI、归档页与 `skills/` 示例都
+   按万元消费，归档本身是厂商镜像。所以换算点仍然只有一个：**事件层
+   `crawler/store.py::_northbound_event`**，与 quote 的 `_yuan_from_yi()` 同规则。
+
+代价与改动点：
+
+- 新增 `_yuan_from_wan()`（`Decimal × 10000`，四位小数），`net_buy_amount` 与成交额各调用一次。
+- `deal_amount_wan` 更名为 `deal_amount`（同值，元）。理由：同一信封里不允许两种金额刻度，而
+  字段名是唯一能藏单位的地方。FC 的 `NorthboundFields` 是 `extra="allow"`、DWD 没有这一列
+  （`db/models/dwd.py:269-288`），改名对 FC 无破坏；若后端架构师确认存在外部消费方读旧名，
+  退一步保留 `deal_amount_wan` 并在 §3.7 规则行显式标注「万元」——这是唯一允许的例外。
+- **不加代次标记**，`biz_key` 仍是 `trade_date|channel`。FC 的北向写入是 `insert_once`
+  （`db/repositories/dwd.py:114-117`，键 `(trade_date, channel)`）：换键只会在 ODS 留下同一天
+  两条不同量级的事件，DWD 仍只认第一条，等于制造双份真相而不是修正。新日期自然用新单位。
+- 存量：`NET_DEAL_AMT` 自 2024-08-19 起上游停发，爬虫只回看 250 个交易日
+  （`_NORTHBOUND_HISTORY_DAYS`），历史路径必然为 null；带值的行只可能来自盘中实时快照。
+  上线前按 `SELECT channel, trade_date, net_buy_amount FROM dwd.northbound_flow
+  WHERE net_buy_amount IS NOT NULL` 盘点；若 >0，走一次定向人工修数（本期不做，属生产写操作）。
+- 部署当天已发布的万元事件不会自己变对（同日同键被去重），次日恢复；当天若必须正确，只能按该
+  `(trade_date, channel)` 定向补发，并接受 DWD 只认首行的事实。
+
+验收断言（子单 A）：
+
+- `net_inflow = 123456.78`（万元）→ 事件 `net_buy_amount == "1234567800.0000"`（×1e4，四位小数）。
+- 负值原样保留（净卖出是真实状态），`None` 仍缺席、不补 0。
+- 源码扫描：北向换算因子只允许出现在 `store.py::_yuan_from_wan()` 一处；`funds.py` 不得出现 `10000`。
+- 集成测试 fixture 换成真实量级（现在的 `123456789.0` 万元是 1.2 万亿元，会把单位错误掩盖掉）。
+
+**是否需要改代码：是**（TickHub-CN，事件层 + 测试）。这一条不能用文档约束替代：契约样例与
+代码现在相差 1e4，不改就是持续产出错数。
+
+### 9.3 定稿二：K 线成交量统一为股
+
+**结论：A 股 1 手 = 100 股；事件 `volume` 一律股（整数字符串）。归档与 `tencent_kline`
+工具保持腾讯原值「手」。**
+
+为什么：
+
+1. 契约 §3.3 的样例 `"12345600"` 按股是 1234.56 万股/日，正常；按手是 12.3 亿股/日，比工行
+   2026-10-30 全天的 4.32 亿股还多近 3 倍——样例只有按股才落在常见量级。
+2. US 侧本来就是股（US `UNIT-AUDIT.md` §2）。手与股混用会让跨市场比较成交活跃度差 100 倍，
+   比字段缺失更危险——数字看着正常，结论错 100 倍。
+3. 换算成本极低：FC 只存不算（`dwd/writer.py:215-217`、`db/models/dwd.py:148`），DWS 没有任何
+   公式消费 volume；LadderStock 读的是 MCP 工具而不是事件，不受影响。
+
+代价与改动点：
+
+- 事件层 `store.py::_kline_fields` 新增 `_shares_from_lots()`（`Decimal × 100`），输出整数字符串；
+  归档 SQLite 保留手（厂商镜像，与 quote 的亿元原值同一规则）。
+- `biz_key` 从 `trade_date|period|adjust` → `trade_date|period|adjust|g2`。**必须换键**：FC 的
+  K 线走 `insert_version`（`dwd/writer.py:205`），换键后修正值落成 v2、读侧取最新版本；不换键则
+  被 `event_id` 去重丢弃，修正永远到不了仓。
+- 工具契约不改：`tencent_kline` 镜像厂商，`skills/tickhub-cn/examples/quote.md` 已标注「手」。
+
+验收断言（子单 A）：
+
+- 601398 2026-10-30：厂商 `4315746` 手 → 事件 `"431574600"`；`biz_key` 以 `|g2` 结尾，同日
+  重发 `event_id` 稳定（常量，不是时间戳）。
+- 量级夹层（两条独立旁证）：`431574600 股 × 8.75 元 = 3.776e9`，腾讯同笔成交额
+  `3760466142 元`，差 0.4%（VWAP 差异）；换手率 0.16% × 流通股 2696 亿 ≈ 431M 股。
+- 反例：不换算时 `volume × close` 比成交额小 100 倍，测试必须抓得到。
+- 源码扫描：`store.py` 的 K 线路径只允许一处 `100` 因子；`market.py`（工具解析）不得出现换算。
+
+**是否需要改代码：是**（TickHub-CN，事件层 + 测试 + 键代次）。
+
+### 9.4 定稿三：US/HK 没有币种列 → 本期不改表，但必须补市场闸
+
+**结论：本期不改表结构。US/HK 金额在 DWD 里没有币种可依，按「不可用于任何金额计算」处理；
+同时把「非 A 股不得进入估值口径」变成代码闸，而不是只写在文档里。**
+
+取证（2026-10-31）：
+
+- `dwd.stock_quote_snapshot`（`db/models/dwd.py:200-234`）既没有 `currency`，也没有 `market`；
+  `currency` 只存在于 `dwd.northbound_flow`（`:284`）。US 事件其实带了 `currency`/`market`
+  （`us_collector/collector.py:489-491`），但 `_write_quote`（`dwd/writer.py:230-262`）不落这两列，
+  落库后不可自证。
+- `reference`/`snapshot` 的符号域来自 DWD 里已有的 symbol（`dws/builder.py:681-700`），**没有任何
+  市场过滤**。`symbol` 是唯一的市场判别依据（6 位数字 = A 股，字母 = US ticker，
+  `query/service.py:54-68`）。
+- 货币信息在事件里有、在 DWD 里没有；唯一能防止误用的地方是 DWS 的符号域。
+
+本期约束（写进契约，不改表）：
+
+1. 三张 DWD 表（`stock_quote_snapshot` / `stock_kline_daily` / `stock_financial_snapshot`）的
+   金额列**只按 A 股口径理解为元**；非 A 股行不得参与估值、跨市场比较或对外展示。
+2. US/HK 的 `reference`/`snapshot` 输出 **null + 原因码**（`currency_unknown` /
+   `unsupported_market`），这是预期行为，不是缺陷。
+3. DWS `_targets` 增加 A 股闸：`build --all` 只枚举 6 位数字 symbol；被跳过的符号进
+   `BuildReport` 的可解释原因，不静默丢弃。
+
+扩表触发条件（满足任意一条就必须做，不受本期约束）：
+
+- 任一 US/HK 标的进入 `reference`/`snapshot` 的符号域；
+- 任一消费方需要跨市场比较市值、成交额、PE/PB；
+- 对外接口或看板展示 US/HK 金额且不附带市场上下文；
+- FC 把 `amount` / `volume` 纳入任何公式。
+
+扩表时要动的字段（预估成本，写在这里免得重新考古）：三张表各加
+`currency CHAR(3) NOT NULL DEFAULT 'CNY'` 与 `market CHAR(2)`；存量 A 股行回填 `CNY`/`CN`；
+`quote` 的 `close`/`total_market_cap`、`kline` 的 `open/high/low/close/amount`、`financial` 的
+`amount_*` 全部受影响；`volume` 跨市场同为股，不受币种影响。
+
+**是否需要改代码：表结构不改（本期）。** DWS 市场闸是代码改动，落子单 B（低风险防御，不碰表）。
+
+### 9.5 可直接合入 FinanceCoffer 的契约文本
+
+（§9.1 的 quote/financial 段落继续有效，以下是 v0.9 增量，逐字可用。）
+
+```text
+[event-contract.md §2 biz_key]
+  K 线   = trade_date|period|adjust|g2
+  quote  = trade_date|ts|g2
+  北向   = trade_date|channel              （该表 insert_once，换键无收益，见 §9.2）
+  尾缀 g2 = 字段代次：市值为元 + pb_mrq + 扣非归母（quote/financial），或成交量由手改为股
+            （kline）。代次是常量，不随运行时间变化；event_id 只哈希
+            provider|data_type|symbol|biz_key，DWD 按 event_id 去重，所以单位/口径变化必须
+            体现为键变化，否则修正会被当成重放丢弃。
+
+[event-contract.md §3.3 kline]
+  volume  string  成交量，单位**股**。A 股由采集端按 1 手 = 100 股换算，US 本来就是股；
+                  消费端不得再乘 100，也不得按行业惯例理解为手。
+
+[event-contract.md §3.4 quote]
+  total_market_cap / close 为**基本货币单位**（A 股=元，US=美元，HK=港元），换算在采集端完成。
+  structured_fields 里的 currency/market 仅供追溯：dwd.stock_quote_snapshot 没有这两列，
+  非 A 股行的金额没有币种可依，不得参与任何估值或跨市场比较。
+
+[event-contract.md §3.7 northbound]
+  net_buy_amount string  当日净买入额，单位**元（CNY）**。上游 2024-08-19 起停止披露时字段
+                         缺席，不补 0、不外推。
+  deal_amount    string  当日成交额，单位**元（CNY）**。旧名 deal_amount_wan（万元）作废，
+                         不再发送。
+  currency       string  固定 "CNY"。
+  biz_key        trade_date|channel
+  消费端注意：dwd.northbound_flow 以 (trade_date, channel) 插入一次、不可变；同一天换单位后
+  重新发布的事件不会覆盖旧行。
+
+[dws-metrics.md §4.1 金额单位行]
+  元（CNY），与 DWD amount_* 原样一致，不做万元/亿元换算、不做汇率换算。该口径只适用于 A 股
+  （market=CN）；US/HK 行缺少币种列，reference/snapshot 一律 null + 原因码
+  （currency_unknown / unsupported_market）。
+
+[event-contract.md §7 G-02]
+  kline 成交量单位已定：股（1 手 = 100 股）；northbound 金额单位已定：元。两项均为 QUOT-258
+  产品定稿（2026-10-31），TickHub 侧按此实现，契约不再保留「待确认」。
+```
+
+### 9.6 派单
+
+- **子单 A（TickHub-CN）**：事件层单位统一——北向元化（§9.2）与 K 线股化（§9.3），含测试与键代次。
+- **子单 B（FinanceCoffer）**：契约 v0.9（§9.5 逐字合入）+ DWS 市场闸（§9.4）。
+- **不派单**：表结构变更（§9.4 明确本期不做）、存量北向修数（先盘点，>0 再单独议）。
 
 
