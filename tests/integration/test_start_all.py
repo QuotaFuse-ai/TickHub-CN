@@ -29,6 +29,22 @@ from tests.integration._procs import (
 pytestmark = pytest.mark.slow
 
 
+def _wait_gone(pid: int, timeout: float = 10.0) -> bool:
+    """Wait until the pid leaves the process table.
+
+    ``pid_alive`` uses ``os.kill(pid, 0)`` on POSIX, which keeps succeeding while
+    the process is a zombie awaiting reaping — the supervisor can be gone while
+    the killed child is still listed for a few milliseconds. Asserting liveness
+    immediately after shutdown therefore races; poll instead of assuming.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _listen_addrs(pid: int) -> list[Any] | None:
     """LISTEN sockets owned by ``pid``; ``None`` when the OS denies inspection."""
     try:
@@ -129,10 +145,10 @@ def test_start_all_supervises_one_child_and_one_port(tmp_path: Path) -> None:
     assert proc.poll() is not None
     if graceful:
         assert proc.returncode == 0
-    assert not pid_alive(server_pid)
+    assert _wait_gone(server_pid)
     assert not port_open(port)
     if second_pid:
-        assert not pid_alive(second_pid)
+        assert _wait_gone(second_pid)
     if graceful:
         journal._read_new()
         events = [r.get("event") for r in journal.rows]
