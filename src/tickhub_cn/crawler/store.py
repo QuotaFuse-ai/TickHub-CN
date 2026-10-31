@@ -525,7 +525,7 @@ def _financial_event(
         biz_key=f"{report_date}|{statement}|{_GENERATION}",
         event_time=report_date,
         content={"structured_fields": fields, "quality_metrics": metrics},
-        source_info={"provider": "eastmoney", "hub": CN_HUB},
+        source_info=_source_info("eastmoney"),
     )
 
 
@@ -562,7 +562,7 @@ def _kline_event(code: str, row: dict[str, Any], *, period: str, adjust: str) ->
             "structured_fields": fields,
             "quality_metrics": {"confidence": "high", "quality_status": "normal"},
         },
-        source_info={"provider": "tencent", "hub": CN_HUB},
+        source_info=_source_info("tencent"),
     )
 
 
@@ -614,7 +614,7 @@ def _quote_event(
                 "quality_status": "suspicious" if row.get("is_stale") else "normal",
             },
         },
-        source_info={"provider": "tencent", "hub": CN_HUB},
+        source_info=_source_info("tencent"),
     )
 
 

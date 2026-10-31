@@ -2,6 +2,13 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-10-31 · financial / kline / quote 事件补合规标记（QUOT-273）
+
+- `financial`、`kline`、`quote` 三类事件的 `source_info` 改用与公告 / 研报 / 风险 / 北向同一个构造函数 `_source_info()`，因此也带上 `compliance_tier=C` 与 `commercial_use=false`。此前这三处只写了 `provider` 与 `hub`，下游 FinanceCoffer 的合规闸门（`FC_COMPLIANCE_ENABLED=true`）把缺标记的事件一律拒收进 DLQ。
+- 只补标记：字段语义、单位换算、`biz_key` 与 `event_id` 哈希口径全部不变，四类原有事件产出的字节不变。
+- 新增契约测试 `tests/contract/test_source_info_compliance.py`，逐个 `data_type` 断言序列化后的 `source_info` 带合法 tier 与布尔 `commercial_use`；心跳按契约继续不带标记（它是服务信号，不落 ODS）。
+- 影响范围：仅事件旁路（`EVENT_PUBLISH_ENABLE=true` 时）。**改动本身不动生产**，现网采集进程重启后新事件才带标记，存量回灌见对应工单。
+
 ## 2026-10-30 · 事件金额单位统一为元 + 估值字段补齐（QUOT-249）
 
 - `quote` 事件的 `total_market_cap` 改为**元**：厂商（腾讯行情第 45 位）的亿元值在 `crawler/store.py:_quote_event` 里 ×1e8 **一次**，本地 SQLite 归档继续存亿元原值。换算点唯一性由源码扫描测试守住，重复换算 / 不换算都会红。

@@ -852,7 +852,7 @@ FC_EVENT_REDIS_URL=redis://127.0.0.1:6379/1   # 默认值，务必与业务缓�
 | `schema_version` | `"1.0"` |
 | 保留策略 | `XADD MAXLEN ~ 100000`（Redis 需开启 AOF，否则重启丢事件） |
 | 发布范围 | 公告、研报、风险、北向等已落库的数据类型；只对新入库的行发布，补跑与重试不重复发布 |
-| 合规标记 | `compliance_tier=C`、`commercial_use=false` |
+| 合规标记 | 除心跳外的每种 `data_type` 都带 `compliance_tier=C`、`commercial_use=false`，由 `crawler/store.py:_source_info()` 单点产出 |
 
 设计要点：
 
