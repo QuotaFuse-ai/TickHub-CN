@@ -2,6 +2,15 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-11-03 · 新增批量当日实时资金流工具（QUOT-369）
+
+- `funds` 层新增 `stock_fund_flow_batch(codes, max_codes=150)`：一次东财 `ulist.np/get` 请求带 150 只，超过 150 只自动分批，返回 `code` / `name` / `price` / `change_pct` / `main_net` / `main_net_pct`，字段名与逐只 `realtime_fund_flow` 完全一致（`f62 → main_net`、`f184 → main_net_pct`），下游不需要再学一套新名字。批量口径为**当日实时**（`meta.scope`，收盘后为当日终值，单位元）。
+- 消灭逐只 fan-out：单批失败只报告该批的 codes 与原因（`data.failures`），**不降级成逐只请求**；若失败原因是端点闸门 `QFSD-7001`，后续批次直接标记为未请求并原样报出 `retry_after_s`，不再空等 25 秒 × N。部分失败时 `ok=false` + `QFSD-8001`，与 `tencent_quote_batch` 同口径。
+- 静默截断可见：每批对账 `requested / returned / dropped`，上游少回的行会把具体 codes 列出来（`data.dropped`、`meta.requested/returned`），不会让人以为全拿到了。切片上限取 150，是父任务实机测得的截断阈值；实机复核当日 300 只一次发过去能回 300 行，上限是否放宽留待父任务定。
+- 批次之间按 `core/http.py` 既有的 push2 闸门留间隔（`ENDPOINT_MIN_INTERVAL + 0.5`），**不改熔断与闸门本身**；200 只 = 2 次请求、两次相隔 ≥25 秒。
+- 缓存语义：批量入参是 `codes` 而不是 `code`，注册表按整组参数哈希缓存（60 秒），换一组 codes 就是另一次上游请求，不复用上一组里单只的结果——这条写在工具描述里。
+- 影响范围：只新增工具，既有工具与接口不变。工具目录计数随之从 124/149 改为 125/150（README、`docs/CI.md`、skill 目录、`skills/tickhub-cn/references/tools.md` 与各契约测试同步）。
+
 ## 2026-10-31 · financial / kline / quote 事件补合规标记（QUOT-273）
 
 - `financial`、`kline`、`quote` 三类事件的 `source_info` 改用与公告 / 研报 / 风险 / 北向同一个构造函数 `_source_info()`，因此也带上 `compliance_tier=C` 与 `commercial_use=false`。此前这三处只写了 `provider` 与 `hub`，下游 FinanceCoffer 的合规闸门（`FC_COMPLIANCE_ENABLED=true`）把缺标记的事件一律拒收进 DLQ。

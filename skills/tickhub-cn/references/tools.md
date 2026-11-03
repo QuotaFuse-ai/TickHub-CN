@@ -1,6 +1,6 @@
 # Tool catalogue
 
-124 canonical tools + 25 aliases = 149 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
+125 canonical tools + 25 aliases = 150 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
 
 TTL is the cache lifetime in seconds; `—` means the alias shares its target's behaviour and the response is not cached separately.
 
@@ -88,6 +88,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `northbound_flow` | `history`, `days` | 60 | Northbound / southbound intraday net flow; ``history=True`` gives daily turnover history. |
 | `realtime_fund_flow` | `code` | 60 | Realtime snapshot of one stock's main-capital flow. |
 | `stock_fund_flow` | `code`, `days` | 60 | Daily main/small/medium/large/super-large net inflow for one stock. |
+| `stock_fund_flow_batch` | `codes`, `max_codes` | 60 | Batch 当日实时 main-capital flow: one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call. |
 
 ## Macro & rates (`macro`)
 

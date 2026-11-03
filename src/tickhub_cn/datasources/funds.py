@@ -6,16 +6,18 @@ import datetime as _dt
 import json
 import math
 import re
+import time
 from typing import Any
 
-from ..core.errors import TickHubError
-from ..core.http import em_datacenter, em_get, request
-from ..core.ticker import eastmoney_secid, normalize_code, sina_symbol
+from ..core.errors import TickHubError, as_error
+from ..core.http import ENDPOINT_MIN_INTERVAL, em_datacenter, em_get, request
+from ..core.ticker import eastmoney_secid, ensure_code_list, normalize_code, sina_symbol
 from .base import tool
 from .financials import _baostock, _bs_code
 from .util import code_or_raise, empty, frame, now_shanghai, ok, require_date, to_float, to_int
 
 _PUSH2 = "https://push2.eastmoney.com/api/qt/stock/get"
+_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 _PUSH2HIS = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 _CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
 _KAMT = "https://push2.eastmoney.com/api/qt/kamt/get"
@@ -415,6 +417,133 @@ def realtime_fund_flow(code: str) -> dict[str, Any]:
         },
         "eastmoney",
     )
+
+
+_ULIST_FIELDS = "f12,f14,f2,f3,f62,f184"
+# The 150 slice comes from the parent task's live measurement: 300 or 500 codes in
+# one ``secids=`` answered only 151 rows, silently. Re-measured 2026-11-03 and 300
+# codes came back whole, so the cap is not stable -- slice at 150 *and* reconcile
+# every batch against the rows that actually came back.
+_ULIST_MAX_PER_REQUEST = 150
+# push2 families get one call per ENDPOINT_MIN_INTERVAL seconds and the gate
+# gives up after ENDPOINT_MAX_WAIT (core/http.py), so the second and later
+# batches have to be spaced out here rather than fired back to back.
+_ULIST_BATCH_GAP = ENDPOINT_MIN_INTERVAL + 0.5
+
+
+def _ulist_flow_rows(secids: list[str]) -> list[dict[str, Any]]:
+    payload = em_get(
+        _ULIST,
+        params={
+            "fltt": "2",
+            "invt": "2",
+            "fields": _ULIST_FIELDS,
+            "secids": ",".join(secids),
+        },
+    )
+    diff = ((payload or {}).get("data") or {}).get("diff") or []
+    rows: list[dict[str, Any]] = []
+    for row in diff:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "code": str(row.get("f12") or ""),
+                "name": row.get("f14"),
+                "price": to_float(row.get("f2")),
+                "change_pct": to_float(row.get("f3")),
+                # f62 = 主力净流入净额（元）, f184 = 主力净流入净占比（%）; the
+                # output names stay the ones realtime_fund_flow already publishes.
+                "main_net": to_float(row.get("f62")),
+                "main_net_pct": to_float(row.get("f184")),
+            }
+        )
+    return rows
+
+
+@tool(layer="funds", ttl=60, cache_domain="funds")
+def stock_fund_flow_batch(codes: str, max_codes: int = _ULIST_MAX_PER_REQUEST) -> dict[str, Any]:
+    """Batch 当日实时 main-capital flow: one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call.
+
+    ``main_net`` / ``main_net_pct`` are the same fields (f62 / f184) the per-stock
+    ``realtime_fund_flow`` publishes. A batch is never retried code by code: a
+    failed batch is reported in ``failures`` with its codes and left for the
+    caller to retry. ``dropped`` lists codes the upstream answered nothing for.
+    """
+    try:
+        items = list(dict.fromkeys(ensure_code_list(codes)))
+    except ValueError as exc:
+        raise TickHubError("QFSD-9001", str(exc)) from exc
+    if not items:
+        raise TickHubError("QFSD-9001", "at least one code is required")
+    size = max(1, min(int(max_codes or _ULIST_MAX_PER_REQUEST), _ULIST_MAX_PER_REQUEST))
+    chunks = [items[i : i + size] for i in range(0, len(items), size)]
+
+    flows: dict[str, Any] = {}
+    failures: list[dict[str, Any]] = []
+    batches: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    fetched_at = ""
+    last_started: float | None = None
+
+    for index, chunk in enumerate(chunks):
+        if last_started is not None:
+            left = _ULIST_BATCH_GAP - (time.monotonic() - last_started)
+            if left > 0:
+                time.sleep(left)
+        last_started = time.monotonic()
+        try:
+            rows = _ulist_flow_rows([eastmoney_secid(c) for c in chunk])
+        except Exception as exc:  # noqa: BLE001 - one bad batch must not lose the rest
+            err = as_error(exc)
+            failures.append({"batch": index, "codes": chunk, "error": err.to_dict()})
+            if err.code == "QFSD-7001":
+                # Paced or tripped: the remaining batches would all fail the same
+                # way, 25 seconds apart. Report them instead of stalling.
+                failures.extend(
+                    {"batch": later, "codes": rest, "error": err.to_dict()}
+                    for later, rest in enumerate(chunks[index + 1 :], start=index + 1)
+                )
+                break
+        else:
+            for row in rows:
+                flows[row["code"]] = row
+            missing = [c for c in chunk if c not in flows]
+            dropped.extend(missing)
+            stamp = now_shanghai().isoformat(timespec="seconds")
+            fetched_at = stamp
+            batches.append(
+                {
+                    "batch": index,
+                    "requested": len(chunk),
+                    "returned": len(chunk) - len(missing),
+                    "dropped": missing,
+                    "fetched_at": stamp,
+                }
+            )
+
+    failed_codes = sum(len(item["codes"]) for item in failures)
+    payload = ok(
+        {
+            "total": len(items),
+            "succeeded": len(flows),
+            "failed": failed_codes,
+            "dropped": dropped,
+            "flows": flows,
+            "failures": failures,
+            "batches": batches,
+        },
+        "eastmoney",
+        fetched_at=fetched_at or None,
+        extra={"scope": "当日实时", "requested": len(items), "returned": len(flows), "batches": len(chunks)},
+        note="当日实时累计口径（盘中每分钟变化，收盘后为当日终值）；main_net 单位元，main_net_pct 单位 %",
+    )
+    if failures or dropped:
+        payload["ok"] = False
+        payload["meta"]["error_code"] = "QFSD-8001"
+        payload["meta"]["partial"] = True
+        payload["meta"]["retryable"] = True
+    return payload
 
 
 def _sina_realtime_flow(code: str) -> dict[str, Any]:

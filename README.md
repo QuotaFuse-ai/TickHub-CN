@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  A 股全栈数据 · 14 层工具 · 124 个 MCP 工具 + 25 个兼容别名
+  A 股全栈数据 · 14 层工具 · 125 个 MCP 工具 + 25 个兼容别名
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
   <a href="https://github.com/QuotaFuse-ai/TickHub-CN/stargazers"><img src="https://img.shields.io/github/stars/QuotaFuse-ai/TickHub-CN?style=social" alt="Stars"></a>
   <br>
   <img src="https://img.shields.io/badge/layers-14-2ea44f.svg" alt="Layers">
-  <img src="https://img.shields.io/badge/MCP%20tools-149-2ea44f.svg" alt="Tools">
+  <img src="https://img.shields.io/badge/MCP%20tools-150-2ea44f.svg" alt="Tools">
   <img src="https://img.shields.io/badge/auth-zero-success.svg" alt="Zero Auth">
 </p>
 
@@ -48,7 +48,7 @@ TickHub-CN（A股数据枢纽）只做一件事：**把 A 股数据变成模型�
 **只想先看它能不能出数？** 跳到 [30 秒上手](#zero-key)：两条命令，零密钥，直接拿到浦发银行的实时价。
 **在想为什么不用 akshare 或自己调接口？** 看 [对比表](#compare)，一张表说清取舍。
 
-- 124 个规范工具 + 25 个兼容别名 = **149 个 MCP 名称**，分 14 层。
+- 125 个规范工具 + 25 个兼容别名 = **150 个 MCP 名称**，分 14 层。
 - 核心数据源**不需要 API Key、不需要账号、不需要验证码**；可选源用环境变量开启。
 - Redis 可选：没有 Redis 时自动降级为进程内缓存，并以 `QFSD-2001` 提示，不会失败。
 - 上游失败自动切换备用源；批量调用逐条报告失败，不吞掉成功项。
@@ -86,7 +86,7 @@ th-cn stock info 600000
 ```bash
 th-cn tool call tencent_quote --params '{"codes":"sh600000"}' --fields code,name,price,change_pct
 th-cn tool call tencent_kline --params '{"code":"sh600000","period":"daily","limit":5}'
-th-cn tool list --help        # 149 个名称都在这里
+th-cn tool list --help        # 150 个名称都在这里
 th-cn doctor                  # 环境、缓存后端、数据源体检
 ```
 
@@ -114,7 +114,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 | 鉴权 | **零密钥**，装完即用 | 零密钥 | 零密钥，但签名与请求头要自己维护 | 注册 token，部分接口按积分/付费 |
 | 返回结构 | 统一 envelope：`ok / data / meta{source, fetched_at, confidence, trace_id}` | 每个函数一套 DataFrame，字段随源变化 | 原始 JSON，字段随源站改版而变 | 统一，但有版本差异 |
 | 稳定性处理 | 内置分组限流、熔断、多源切换、旧缓存兜底、代理池 | 基本没有，失败需自己重试 | 全部自己扛（封 IP、字段改名） | 官方保障 |
-| 覆盖广度 | 149 个名称 / 14 层，聚焦 A 股高频场景 | 上千个接口，广度最大 | 取决于愿意逆向多少 | 偏基本面与行情 |
+| 覆盖广度 | 150 个名称 / 14 层，聚焦 A 股高频场景 | 上千个接口，广度最大 | 取决于愿意逆向多少 | 偏基本面与行情 |
 | 部署 | 一个 wheel，Python 3.11+，无需浏览器 | `pip install` + pandas | 无需依赖，但要自己写爬虫 | 需要 SDK 与网络鉴权 |
 | 许可 / 成本 | Apache-2.0，免费 | MIT，免费 | 免费，但维护成本高 | 免费额度 + 付费/积分 |
 | 最适合 | AI Agent、自动化取数、不想写爬虫 | 数据探索、研究、需要广度 | 深度定制、只取一两个接口 | 需要 SLA 或合规授权的团队 |
@@ -135,7 +135,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 - [Docker / 容器部署](#docker)
 - [接入方式（MCP / CLI / Python）](#clients)
 - [Skill 用法](#skill)
-- [数据覆盖（14 层，149 个名称）](#layers)
+- [数据覆盖（14 层，150 个名称）](#layers)
 - [返回结构与通用参数](#envelope)
 - [与 FinanceCoffer 的数据交互](#financecoffer)
 - [使用示例](#examples)
@@ -160,7 +160,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 | 能力 | 说明 |
 | --- | --- |
 | 四套入口 | MCP stdio / MCP Streamable HTTP / CLI `th-cn` / Python `StockDataClient`，返回同一套 envelope |
-| 149 个 MCP 名称 | 124 个规范工具 + 25 个历史别名，`tools/list` 一次返回 |
+| 150 个 MCP 名称 | 125 个规范工具 + 25 个历史别名，`tools/list` 一次返回 |
 | 14 层数据 | 行情、财报、盘面、资金、宏观、公告、指数、期货、事件、研报、舆情、期权、可转债、估值 |
 | 时点回看 | 任意工具传 `data_as_of`，丢弃该时点之后才发布的记录 |
 | 字段投影 | 全局 `fields` 选择列；`tier=brief/medium/full` 三档预设 |
@@ -178,7 +178,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 
 ```
 th-cn (CLI)  ─┐
-              ├─► 工具注册表（124 tools / 14 layers / 25 aliases）
+              ├─► 工具注册表（125 tools / 14 layers / 25 aliases）
 MCP stdio ────┤        │
 MCP HTTP  ────┤        ├─► 缓存（Redis 可选 → 进程内降级）
 Python API ───┘        ├─► 限流 / 熔断 / 代理池 / 重试
@@ -395,7 +395,7 @@ print(quote["data"][0]["price"])
 print(len(client.tools()), client.layers())
 ```
 
-`client.call(name, params)` 与 MCP `tools/call` 完全等价；`client.tools()` 返回 149 个名称。
+`client.call(name, params)` 与 MCP `tools/call` 完全等价；`client.tools()` 返回 150 个名称。
 
 ### 客户端矩阵
 
@@ -411,7 +411,7 @@ print(len(client.tools()), client.layers())
 | OpenClaw / WorkBuddy / Muse / Grok Bot | 有 MCP 入口就用 `mcpServers` 或 URL；没有则加载 `skills/tickhub-cn/SKILL.md` 并调 CLI | 协议兼容，**未逐客户端实机冒烟** |
 | 任意 OpenAI function-calling 客户端 | 用 `web/gateway.py` 或自写适配器转发到 `/mcp` | 需要适配层 |
 
-验收标准只有一条：`tools/list` 返回 149 个名称，`tencent_quote` 返回 `ok: true`。
+验收标准只有一条：`tools/list` 返回 150 个名称，`tencent_quote` 返回 `ok: true`。
 
 ---
 
@@ -426,7 +426,7 @@ print(len(client.tools()), client.layers())
 skills/tickhub-cn/
 ├── SKILL.md                  # 触发条件、前置检查、核心规则
 ├── references/
-│   ├── tools.md              # 149 个名称的完整参数表（脚本生成，勿手改）
+│   ├── tools.md              # 150 个名称的完整参数表（脚本生成，勿手改）
 │   ├── cli.md                # 命令行用法
 │   ├── envelope-and-errors.md
 │   └── sources.md            # 数据源、限流与降级
@@ -456,14 +456,14 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 
 <a id="layers"></a>
 
-## 数据覆盖（14 层，149 个名称）
+## 数据覆盖（14 层，150 个名称）
 
 | 层 | 工具数 | 覆盖内容 |
 | --- | --- | --- |
 | [行情 quotes](#layer-quotes) | 13 | 实时价、PE/PB、K 线（日/周/月、1~60 分钟、复权）、逐笔、ETF、指数、全市场日线 |
 | [财报 financials](#layer-financials) | 13 | 三大报表、财务指标、勾稽校验、主营构成、十大股东、估值历史、F10、附注定位 |
 | [盘面 market](#layer-market) | 23 | 涨停/跌停/炸板/昨涨停、龙虎榜、板块成员、市场概览、情绪、异动、ST、热榜 |
-| [资金 funds](#layer-funds) | 16 | 个股/板块/排行资金流、北向、两融、大宗、股东户数、分红、筹码、ETF 份额 |
+| [资金 funds](#layer-funds) | 17 | 个股/批量/板块/排行资金流、北向、两融、大宗、股东户数、分红、筹码、ETF 份额 |
 | [宏观 macro](#layer-macro) | 12 | GDP、CPI、PMI、货币供应、社融、LPR、利率走廊、Shibor、国债收益率、日历 |
 | [公告 announcements](#layer-announcements) | 9 | 巨潮/深交所公告、风险事件、财联社、华尔街见闻、央视网、个股/全球新闻 |
 | [指数 index](#layer-index) | 10 | 成分、权重、估值、指数 K 线、交易日历、申万行业指数与分类变迁 |
@@ -573,11 +573,12 @@ CI 会重跑生成并比对，所以不要手改 `references/tools.md`。
 ### 资金层
 
 <details open>
-<summary><b>16 个工具</b> — 资金流 / 北向 / 两融 / 大宗 / 股东户数 / 分红 / 筹码 / ETF 份额</summary>
+<summary><b>17 个工具</b> — 资金流 / 北向 / 两融 / 大宗 / 股东户数 / 分红 / 筹码 / ETF 份额</summary>
 
 | 工具 | 参数 | 说明 |
 | --- | --- | --- |
 | `realtime_fund_flow` | `code` | 个股主力资金实时快照 |
+| `stock_fund_flow_batch` | `codes`, `max_codes` | 当日实时主力资金净流入批量查询：一次 ulist 请求 150 只，超出自动分批，失败批次与被截断的 codes 都在响应里点名 |
 | `stock_fund_flow` | `code`, `days` | 个股主力 / 大 / 中 / 小 / 超大单净流入 |
 | `fund_flow_ranking` | `scope`, `page`, `page_size` | 个股 / 行业 / 概念资金流排行（含 5 / 10 日） |
 | `board_fund_flow` | `board_type`, `page`, `page_size` | 板块资金流排行（含 5 / 10 日） |
@@ -1129,7 +1130,7 @@ ADMIN_ENABLE=true ADMIN_AUTH_TOKEN=change-me th-cn admin serve
 | 缓存 | 统计、按域/前缀失效 |
 | 代理池 | 节点增删启停、巡检、重载（凭证脱敏） |
 | 字段映射 | `field_map.toml` 校验与预览 |
-| MCP 调试 | 149 个名称搜索、参数表单、直接调用；结果顶部显示降级与 `data_as_of` |
+| MCP 调试 | 150 个名称搜索、参数表单、直接调用；结果顶部显示降级与 `data_as_of` |
 | 数据浏览 | 常用工具的表格视图，支持排序、跨页搜索、xlsx 导出 |
 | 爬虫 | 任务状态、手动触发、进度、取消、重试 |
 | 北向 | 归档中的北向日度快照面板 |
@@ -1291,7 +1292,7 @@ th-cn crawler daemon            # 阻塞式定时循环
 th-cn version
 th-cn doctor                      # 环境 / 缓存 / 配置 / 数据源
 th-cn source health               # 逐源探测与延迟
-th-cn tool list --output json     # 149 个 MCP 名称
+th-cn tool list --output json     # 150 个 MCP 名称
 th-cn proxy list                  # 代理节点（凭证脱敏）
 th-cn fieldmap validate
 th-cn config check

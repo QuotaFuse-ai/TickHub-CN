@@ -22,7 +22,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev,admin,notes]"
 
 # Import smoke test
-python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 149, tool_count()"
+python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 150, tool_count()"
 
 # Run tests
 python -m pytest
@@ -55,7 +55,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,admin,notes]"
 
-.\.venv\Scripts\python.exe -X utf8 -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 149, tool_count()"
+.\.venv\Scripts\python.exe -X utf8 -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 150, tool_count()"
 .\.venv\Scripts\python.exe -X utf8 -m pytest
 ```
 
@@ -66,7 +66,7 @@ python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -e ".[dev,admin,notes]"
 
-./.venv/bin/python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 149, tool_count()"
+./.venv/bin/python -c "import tickhub_cn, tickhub_cn.datasources; from tickhub_cn.mcp.server import tool_count; assert tool_count() == 150, tool_count()"
 ./.venv/bin/python -m pytest
 ```
 
@@ -96,9 +96,9 @@ pytest -m live        # 需要真实上游网络，不会被 PR 门禁执行
 
 ### 本机实测（2026-10-31，Windows 10 / Python 3.12.10）
 
-- import smoke：`tool_count() == 149` 通过
+- import smoke：`tool_count() == 150` 通过
 - `pytest`：421 passed, 15 skipped（160.69s）
-- catalog：生成 149 个名称，`git diff --exit-code` 无漂移
+- catalog：生成 150 个名称，`git diff --exit-code` 无漂移
 
 ## 三、required checks 现状
 
