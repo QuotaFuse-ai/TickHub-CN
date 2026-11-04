@@ -15,6 +15,18 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _project_version() -> str:
+    """`pyproject.toml` 是版本唯一真源（QUOT-401）。
+
+    这里改成与 pyproject 比对而不是钉死字面量：`__version__` 现在从安装元数据读，
+    版本 bump 后本用例自动跟随，同时**继续校验「运行期版本 == 打包版本」**。
+    """
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as fh:
+        return tomllib.load(fh)["project"]["version"]
+
+
 def _python(code: str, *, cwd: Path, timeout: float = 30.0, **env_overrides: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "src")
@@ -49,7 +61,9 @@ print(tickhub_cn.__version__)
     proc = _python(script, cwd=tmp_path)
     assert proc.returncode == 0, proc.stderr
     elapsed_ms, version = proc.stdout.split()
-    assert version == "1.0.1"
+    assert version == _project_version(), (
+        f"运行期 __version__={version} 与 pyproject={_project_version()} 不一致"
+    )
     assert float(elapsed_ms) < 300.0, f"cold import took {elapsed_ms} ms"
 
 

@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
-from tickhub_cn import StockDataClient
+from tickhub_cn import StockDataClient, __version__
 from tickhub_cn.core.errors import TickHubError
 
 HERE = Path(__file__).resolve().parent
@@ -31,7 +31,7 @@ client = StockDataClient()
 
 app = FastAPI(
     title="TickHub-CN read-only gateway",
-    version="1.0.1",
+    version=__version__,
     description=(
         "Browser-facing adapter over a fixed allow-list of TickHub-CN reads. "
         "MCP-HTTP itself is JSON-RPC and must not be called directly from a page."

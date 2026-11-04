@@ -2,6 +2,15 @@
 
 本仓库只保留这一份文档。每次优化或修复，在顶部追加一节：日期 · 版本 · 改了什么 · 影响范围。不写设计长文，不记录本机环境、内网地址、工单编号、第三方仓库对比等敏感信息；安装与使用见 README。
 
+## 2026-11-04 · 1.1.0：版本单一真源 + `/healthz` 统一形状 + 首个 GitHub Release（最小包）
+
+- **版本号不再是两份**：`pyproject.toml` 的 `[project] version` 是唯一真源，`tickhub_cn.__version__` 改为从安装元数据（`importlib.metadata`）读取，未安装时回退为 `0.0.0+source`。此前 `__init__.py` 手写 `1.0.1`、`web/gateway.py` 另写一处 `version="1.0.1"`，与 `pyproject.toml` 构成三份真源，bump 版本时必然漏改其中一处，`/healthz`、OpenAPI 文档与 wheel 元数据就会各说各话。
+- **`/healthz` 形状统一**：管理端 `GET /healthz` 由 `{"ok": true, "version": ...}` 扩展为 `{"ok", "status", "service", "version"}` 四字段，`ok` 保留以兼容既有探活脚本。下游（LadderStock）据此判断「当前装的版本」。
+- **首发 GitHub Release 最小包**：仓库此前只有 `publish.yml`（手动触发上传 PyPI），**从未产出过 GitHub Release**，也没有任何 wheel 附件，导致下游无法判断自己装的是不是最新版。本版起每个 tag 都附 `tickhub_cn-<ver>-py3-none-any.whl` 与 `SHA256SUMS`。
+- 版本跨 `1.0.1 → 1.1.0`（minor）：自 `v1.0.1` 以来并入 64 个提交，含新工具 `stock_fund_flow_batch`、`realtime_fund_flow` 量纲修正、事件层单位统一（北向金额→元、K 线成交量→股）、合规标记等新增能力，工具目录由 149 增至 150。
+- 文档同步：`README.md` 与 `docker-compose.yml` 中固定的 `1.0.1` 镜像/安装标签、`skills/tickhub-cn/SKILL.md` 的 `version` 字段一并跟到 `1.1.0`。
+- 影响范围：对外工具与字段口径**不变**；只改版本来源、`/healthz` 字段与发布物。`tests/integration/test_nonfunctional.py` 中钉死的 `1.0.1` 改为与 `pyproject.toml` 比对，避免下次 bump 又漏改。
+
 ## 2026-11-03 · 新增批量当日实时资金流工具（QUOT-369）
 
 - `funds` 层新增 `stock_fund_flow_batch(codes, max_codes=150)`：一次东财 `ulist.np/get` 请求带 150 只，超过 150 只自动分批，返回 `code` / `name` / `price` / `change_pct` / `main_net` / `main_net_pct`，字段名与逐只 `realtime_fund_flow` 完全一致（`f62 → main_net`、`f184 → main_net_pct`），下游不需要再学一套新名字。批量口径为**当日实时**（`meta.scope`，收盘后为当日终值，单位元）。
