@@ -16,7 +16,8 @@ from .base import tool
 from .financials import _baostock, _bs_code
 from .util import code_or_raise, empty, frame, now_shanghai, ok, require_date, to_float, to_int
 
-_PUSH2 = "https://push2.eastmoney.com/api/qt/stock/get"
+# push2 ``stock/get`` 曾被 realtime_fund_flow 用来取资金列，但该端点对 f62/f66/f72/
+# f78/f84/f184 返回的是另一套刻度（符号都可能相反，见 QUOT-368），已改用 ``_ULIST``。
 _ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 _PUSH2HIS = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 _CLIST = "https://push2.eastmoney.com/api/qt/clist/get"
@@ -386,40 +387,50 @@ def board_fund_flow(board_type: str = "industry", page: int = 1, page_size: int 
     return fund_flow_ranking(scope=key, page=page, page_size=page_size)
 
 
+_ULIST_FIELDS = "f12,f14,f2,f3,f62,f184"
+# 逐只用同一端点、同一字段号，外加资金分档（f66/f69 超大单、f72/f75 大单、
+# f78/f81 中单、f84/f87 小单）。批量只取主力两列，逐只要看分档，所以字段集更宽。
+_REALTIME_FLOW_FIELDS = "f12,f14,f2,f3,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184"
+
+
 @tool(layer="funds", ttl="realtime")
 def realtime_fund_flow(code: str) -> dict[str, Any]:
-    """Realtime snapshot of one stock's main-capital flow."""
+    """Realtime snapshot of one stock's main-capital flow (amounts in CNY, ratios in %)."""
     c = code_or_raise(code)
     try:
-        payload = em_get(
-            _PUSH2,
-            params={
-                "secid": eastmoney_secid(c),
-                "fields": "f57,f58,f43,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184",
-            },
-        )
+        # 走 ulist 单 secid，不再用 push2 stock/get：同一刻同一只股票，stock/get 对
+        # f62/f66/f72/f78/f84/f184 返回的是另一套刻度（2026-11-04 实测 002696：
+        # main_net=3.0 vs ulist -171,530,812.0，f184 +11.01% vs -30.63%，符号相反；
+        # f66/f72 直接缺）。只补 fltt/invt 只能修好 price（1018 -> 10.18），
+        # 资金列仍旧是错的 —— 见 QUOT-368。
+        # 与 stock_fund_flow_batch 同端点、同字段号，逐只与批量才同源同量纲。
+        rows = _ulist_flow_rows([eastmoney_secid(c)], fields=_REALTIME_FLOW_FIELDS)
     except TickHubError:
         return _sina_realtime_flow(c)
-    data = (payload or {}).get("data") or {}
-    if not data:
+    if not rows:
         return _sina_realtime_flow(c)
+    row = rows[0]
     return ok(
         {
-            "code": data.get("f57") or c,
-            "name": data.get("f58"),
-            "price": to_float(data.get("f43")),
-            "main_net": to_float(data.get("f62")),
-            "main_net_pct": to_float(data.get("f184")),
-            "super_large_net": to_float(data.get("f66")),
-            "large_net": to_float(data.get("f72")),
-            "medium_net": to_float(data.get("f78")),
-            "small_net": to_float(data.get("f84")),
+            "code": row["code"] or c,
+            "name": row["name"],
+            "price": row["price"],
+            "change_pct": row["change_pct"],
+            "main_net": row["main_net"],
+            "main_net_pct": row["main_net_pct"],
+            "super_large_net": row["super_large_net"],
+            "super_large_pct": row["super_large_pct"],
+            "large_net": row["large_net"],
+            "large_pct": row["large_pct"],
+            "medium_net": row["medium_net"],
+            "medium_pct": row["medium_pct"],
+            "small_net": row["small_net"],
+            "small_pct": row["small_pct"],
         },
         "eastmoney",
+        note="当日实时累计口径；金额单位元，占比单位 %；与 stock_fund_flow_batch 同端点（ulist）同字段号",
     )
 
-
-_ULIST_FIELDS = "f12,f14,f2,f3,f62,f184"
 # The 150 slice comes from the parent task's live measurement: 300 or 500 codes in
 # one ``secids=`` answered only 151 rows, silently. Re-measured 2026-11-03 and 300
 # codes came back whole, so the cap is not stable -- slice at 150 *and* reconcile
@@ -431,33 +442,48 @@ _ULIST_MAX_PER_REQUEST = 150
 _ULIST_BATCH_GAP = ENDPOINT_MIN_INTERVAL + 0.5
 
 
-def _ulist_flow_rows(secids: list[str]) -> list[dict[str, Any]]:
+# 资金分档：(输出净额字段, 输出占比字段, 净额字段号, 占比字段号)
+_FUND_TIERS = (
+    ("super_large_net", "super_large_pct", "f66", "f69"),
+    ("large_net", "large_pct", "f72", "f75"),
+    ("medium_net", "medium_pct", "f78", "f81"),
+    ("small_net", "small_pct", "f84", "f87"),
+)
+
+
+def _ulist_flow_rows(secids: list[str], fields: str = _ULIST_FIELDS) -> list[dict[str, Any]]:
     payload = em_get(
         _ULIST,
         params={
             "fltt": "2",
             "invt": "2",
-            "fields": _ULIST_FIELDS,
+            "fields": fields,
             "secids": ",".join(secids),
         },
     )
+    wanted = {part.strip() for part in fields.split(",")}
     diff = ((payload or {}).get("data") or {}).get("diff") or []
     rows: list[dict[str, Any]] = []
     for row in diff:
         if not isinstance(row, dict):
             continue
-        rows.append(
-            {
-                "code": str(row.get("f12") or ""),
-                "name": row.get("f14"),
-                "price": to_float(row.get("f2")),
-                "change_pct": to_float(row.get("f3")),
-                # f62 = 主力净流入净额（元）, f184 = 主力净流入净占比（%）; the
-                # output names stay the ones realtime_fund_flow already publishes.
-                "main_net": to_float(row.get("f62")),
-                "main_net_pct": to_float(row.get("f184")),
-            }
-        )
+        out: dict[str, Any] = {
+            "code": str(row.get("f12") or ""),
+            "name": row.get("f14"),
+            "price": to_float(row.get("f2")),
+            "change_pct": to_float(row.get("f3")),
+            # f62 = 主力净流入净额（元）, f184 = 主力净流入净占比（%）; the
+            # output names stay the ones realtime_fund_flow already publishes.
+            "main_net": to_float(row.get("f62")),
+            "main_net_pct": to_float(row.get("f184")),
+        }
+        # 分档列只在真的请求了该字段号时才出现，批量（只取主力两列）的输出形状不变。
+        for net_key, pct_key, net_field, pct_field in _FUND_TIERS:
+            if net_field in wanted:
+                out[net_key] = to_float(row.get(net_field))
+            if pct_field in wanted:
+                out[pct_key] = to_float(row.get(pct_field))
+        rows.append(out)
     return rows
 
 
