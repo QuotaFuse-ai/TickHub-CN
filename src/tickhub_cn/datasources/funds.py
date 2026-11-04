@@ -395,7 +395,7 @@ _REALTIME_FLOW_FIELDS = "f12,f14,f2,f3,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184"
 
 @tool(layer="funds", ttl="realtime")
 def realtime_fund_flow(code: str) -> dict[str, Any]:
-    """Realtime snapshot of one stock's main-capital flow (amounts in CNY, ratios in %)."""
+    """Realtime snapshot of one stock's main-capital flow: amounts in 元 (CNY), ratios in %; same 东财 ulist endpoint and field numbers as ``stock_fund_flow_batch``, so one call equals that code's batch row at the same moment."""
     c = code_or_raise(code)
     try:
         # 走 ulist 单 secid，不再用 push2 stock/get：同一刻同一只股票，stock/get 对
@@ -489,7 +489,7 @@ def _ulist_flow_rows(secids: list[str], fields: str = _ULIST_FIELDS) -> list[dic
 
 @tool(layer="funds", ttl=60, cache_domain="funds")
 def stock_fund_flow_batch(codes: str, max_codes: int = _ULIST_MAX_PER_REQUEST) -> dict[str, Any]:
-    """Batch 当日实时 main-capital flow: one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call.
+    """Batch 当日实时 main-capital flow (amounts in 元, ratios in %): one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call.
 
     ``main_net`` / ``main_net_pct`` are the same fields (f62 / f184) the per-stock
     ``realtime_fund_flow`` publishes. A batch is never retried code by code: a
