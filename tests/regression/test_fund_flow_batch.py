@@ -254,6 +254,59 @@ def test_the_batch_carries_the_realtime_caliber_and_fetch_time(upstream: _Record
     assert out["meta"]["cache_hit"] is False
 
 
+def test_a_failed_batch_is_not_cached_so_the_retry_reaches_the_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
+
+    def fake_em_get(url: str, params: dict[str, Any] | None = None, **_kwargs: Any) -> Any:
+        asked.append(str((params or {}).get("secids", "")))
+        if len(asked) == 1:
+            raise TickHubError("QFSD-7001", "push2 reset", detail={"reason": "endpoint_breaker"})
+        return _diff(asked[-1].split(","))
+
+    monkeypatch.setattr(funds, "em_get", fake_em_get)
+    codes = ",".join(_codes(3))
+
+    first = funds.stock_fund_flow_batch(codes)
+    second = funds.stock_fund_flow_batch(codes)
+
+    assert len(asked) == 2
+    assert first["ok"] is False and first["meta"]["cache_hit"] is False
+    assert second["ok"] is True and second["meta"]["cache_hit"] is False
+    assert sorted(second["data"]["flows"]) == _codes(3)
+
+
+def test_a_partial_batch_is_not_cached_and_is_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
+
+    def short_then_whole(url: str, params: dict[str, Any] | None = None, **_kwargs: Any) -> Any:
+        secids = str((params or {}).get("secids", "")).split(",")
+        asked.append(",".join(secids))
+        return _diff(secids[:-1] if len(asked) == 1 else secids)
+
+    monkeypatch.setattr(funds, "em_get", short_then_whole)
+    codes = ",".join(_codes(4))
+
+    first = funds.stock_fund_flow_batch(codes)
+    second = funds.stock_fund_flow_batch(codes)
+
+    assert len(asked) == 2
+    assert first["meta"]["partial"] is True and first["meta"]["cache_hit"] is False
+    assert first["data"]["dropped"] == _codes(4)[-1:]
+    assert second["ok"] is True and second["meta"]["cache_hit"] is False
+
+
+def test_the_endpoint_counter_reads_one_request_for_150_and_two_for_200(upstream: _RecordingSession) -> None:
+    http_mod.reset_endpoint_guard()
+    family = http_mod.endpoint_family(funds._ULIST)
+
+    funds.stock_fund_flow_batch(",".join(_codes(150)), _no_cache=True)
+    assert http_mod.ENDPOINT_COUNTERS.snapshot()[family]["attempts"] == 1
+
+    http_mod.reset_endpoint_guard()
+    funds.stock_fund_flow_batch(",".join(_codes(200)), _no_cache=True)
+    assert http_mod.ENDPOINT_COUNTERS.snapshot()[family]["attempts"] == 2
+
+
 def test_a_cached_call_is_served_without_an_upstream_request(upstream: _RecordingSession) -> None:
     codes = ",".join(_codes(3))
 

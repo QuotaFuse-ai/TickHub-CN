@@ -232,10 +232,11 @@ def is_connection_reset(exc: BaseException) -> bool:
 
 
 def reset_endpoint_guard() -> None:
-    """Clear limiters and breaker windows (tests / admin maintenance)."""
+    """Clear limiters, breaker windows and counters (tests / admin maintenance)."""
     ENDPOINT_BREAKER.reset()
     with _ENDPOINT_LIMIT_LOCK:
         _ENDPOINT_LIMITERS.clear()
+    ENDPOINT_COUNTERS.clear()
 
 
 class HealthRegistry:
@@ -293,7 +294,11 @@ class HealthRegistry:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
-            payload = {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "sources": self._state}
+            payload = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "sources": {k: dict(v) for k, v in self._state.items()},
+                "endpoints": ENDPOINT_COUNTERS.snapshot(),
+            }
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, path)
             self._dirty = False
@@ -305,15 +310,84 @@ class HealthRegistry:
 HEALTH = HealthRegistry()
 
 
-def read_health_state(path: str | Path | None = None, *, max_age_s: float = 86400) -> dict[str, dict[str, Any]]:
-    """Health counters written by another process, ignored once stale."""
+class EndpointCounters:
+    """Read-only attempt accounting per endpoint family.
+
+    One entry is a real round trip to the upstream path, retries included, so a
+    150-code refresh that the endpoint answered once reads 1 here even when the
+    cache was bypassed and a retry failover happened. ``reset_nodes`` keeps the
+    proxy exit each reset came through (``null`` = direct/static proxy) so a
+    single bad node can be told apart from an upstream ban.
+    """
+
+    last_resets_limit = 10
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._families: dict[str, dict[str, Any]] = {}
+
+    def attempt(self, family: str) -> None:
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["attempts"] += 1
+
+    def success(self, family: str) -> None:
+        with self._lock:
+            self._families.setdefault(family, self._blank(family))["successes"] += 1
+
+    def failure(self, family: str) -> None:
+        with self._lock:
+            self._families.setdefault(family, self._blank(family))["failures"] += 1
+
+    def reset(self, family: str, node_id: str | None) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["resets"] += 1
+            cur["last_reset_at"] = stamp
+            cur["last_reset_node"] = node_id
+            cur["reset_nodes"].append({"node": node_id, "at": stamp})
+            del cur["reset_nodes"][: -self.last_resets_limit]
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {k: self._copy(v) for k, v in self._families.items()}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._families.clear()
+
+    @staticmethod
+    def _blank(family: str) -> dict[str, Any]:
+        return {
+            "family": family,
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "resets": 0,
+            "last_reset_at": None,
+            "last_reset_node": None,
+            "reset_nodes": [],
+        }
+
+    @staticmethod
+    def _copy(row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        out["reset_nodes"] = [dict(r) for r in row["reset_nodes"]]
+        return out
+
+
+ENDPOINT_COUNTERS = EndpointCounters()
+
+
+def _read_health_file(path: str | Path | None, *, max_age_s: float = 86400) -> dict[str, Any]:
+    """The raw health document written by another process, empty once stale."""
     p = Path(path) if path else Path(get_settings().health_state_path)
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    sources = raw.get("sources")
-    if not isinstance(sources, dict):
+    if not isinstance(raw, dict):
         return {}
     updated = str(raw.get("updated_at") or "")
     if updated and max_age_s > 0:
@@ -323,7 +397,25 @@ def read_health_state(path: str | Path | None = None, *, max_age_s: float = 8640
                 return {}
         except ValueError:
             pass
+    return raw
+
+
+def read_health_state(path: str | Path | None = None, *, max_age_s: float = 86400) -> dict[str, dict[str, Any]]:
+    """Health counters written by another process, ignored once stale."""
+    sources = _read_health_file(path, max_age_s=max_age_s).get("sources")
+    if not isinstance(sources, dict):
+        return {}
     return {str(k): v for k, v in sources.items() if isinstance(v, dict)}
+
+
+def read_endpoint_counters(
+    path: str | Path | None = None, *, max_age_s: float = 86400
+) -> dict[str, dict[str, Any]]:
+    """Endpoint-family counters written by another process, ignored once stale."""
+    families = _read_health_file(path, max_age_s=max_age_s).get("endpoints")
+    if not isinstance(families, dict):
+        return {}
+    return {str(k): v for k, v in families.items() if isinstance(v, dict)}
 
 
 def _proxy_for(
@@ -455,6 +547,8 @@ def fetch(
     for attempt in range(retries + 1):
         started = time.monotonic()
         proxies, node = _proxy_for(source, tried)
+        if family:
+            ENDPOINT_COUNTERS.attempt(family)
         try:
             resp = _session_for(source).request(
                 method.upper(),
@@ -472,20 +566,29 @@ def fetch(
                 _mark_node(node, True, latency)
             if resp.status_code in allow_status:
                 HEALTH.record(source, True, latency)
+                if family:
+                    ENDPOINT_COUNTERS.success(family)
                 return resp
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
             resp.raise_for_status()
             HEALTH.record(source, True, latency)
+            if family:
+                ENDPOINT_COUNTERS.success(family)
             return resp
         except Exception as exc:  # noqa: BLE001
             latency = (time.monotonic() - started) * 1000
             last_err = exc
             HEALTH.record(source, False, latency, str(exc))
+            reset = family and _is_connection_reset(exc)
+            if family:
+                ENDPOINT_COUNTERS.failure(family)
+                if reset:
+                    ENDPOINT_COUNTERS.reset(family, node.id if node is not None else None)
             if node is not None and isinstance(exc, PROXY_FAULTS):
                 _mark_node(node, False)
                 tried.add(node.id)
-            if family and _is_connection_reset(exc):
+            if reset:
                 ENDPOINT_BREAKER.trip(family)
                 raise TickHubError(
                     "QFSD-7001",

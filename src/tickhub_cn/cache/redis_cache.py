@@ -145,13 +145,24 @@ class Cache:
                 self.redis_ok = False
         self.memory.delete(key)
 
-    def remember(self, key: str, ttl: int, producer: Callable[[], Any], *, refresh: bool = False) -> tuple[Any, bool]:
+    def remember(
+        self,
+        key: str,
+        ttl: int,
+        producer: Callable[[], Any],
+        *,
+        refresh: bool = False,
+        cacheable: Callable[[Any], bool] | None = None,
+    ) -> tuple[Any, bool]:
         if not refresh:
             value, hit = self.get(key)
             if hit:
                 return value, True
         value = producer()
-        self.set(key, value, ttl)
+        # A refused payload (failed or partial) is a cache miss either way, so
+        # callers report ``cache_hit=False`` without the stale copy shadowing it.
+        if cacheable is None or cacheable(value):
+            self.set(key, value, ttl)
         return value, False
 
     def flush(self, prefix: str | None = None) -> int:
