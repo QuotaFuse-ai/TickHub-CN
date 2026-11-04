@@ -38,6 +38,12 @@ Rules for callers:
 
 def build_server(*, include_aliases: bool = True, log_level: str | None = None) -> MCPServer:
     """Build the MCP server with every registered tool."""
+    return _build_server(include_aliases=include_aliases, log_level=log_level, with_healthz=False)
+
+
+def _build_server(
+    *, include_aliases: bool, log_level: str | None, with_healthz: bool
+) -> MCPServer:
     import tickhub_cn.datasources  # noqa: F401  (registers all tools)
 
     from ..datasources.base import ALIASES, REGISTRY
@@ -62,7 +68,19 @@ def build_server(*, include_aliases: bool = True, log_level: str | None = None) 
                 name=alias,
                 description=f"{spec.description or target} (compatibility alias of {target})",
             )
+    if with_healthz:
+        from starlette.responses import JSONResponse
+
+        @server.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+        async def healthz(_request: Any) -> Any:  # noqa: ANN401 - Starlette Request
+            return JSONResponse(healthz_body())
+
     return server
+
+
+def healthz_body() -> dict[str, str]:
+    """QUOT-401：健康端点统一形状；版本只从安装元数据读。"""
+    return {"status": "ok", "service": "tickhub-cn", "version": __version__}
 
 
 def tool_count(*, include_aliases: bool = True) -> int:
@@ -88,8 +106,8 @@ def run_stdio() -> None:
 
 
 def run_http(host: str = "127.0.0.1", port: int = 8000, path: str = "/mcp") -> None:
-    """Serve MCP over Streamable HTTP at ``path``."""
-    server = build_server()
+    """Serve MCP over Streamable HTTP at ``path``, with ``/healthz`` on the same port."""
+    server = _build_server(include_aliases=True, log_level=None, with_healthz=True)
     get_logger("mcp").info(
         "http server starting",
         extra={
@@ -104,7 +122,16 @@ def run_http(host: str = "127.0.0.1", port: int = 8000, path: str = "/mcp") -> N
 
 def create_app(host: str = "127.0.0.1", path: str = "/mcp") -> Any:
     """Starlette app for embedding (tests, docker, custom health routes)."""
-    return build_server().streamable_http_app(host=host, streamable_http_path=path)
+    server = _build_server(include_aliases=True, log_level=None, with_healthz=True)
+    return server.streamable_http_app(host=host, streamable_http_path=path)
 
 
-__all__ = ["INSTRUCTIONS", "build_server", "create_app", "run_http", "run_stdio", "tool_count"]
+__all__ = [
+    "INSTRUCTIONS",
+    "build_server",
+    "create_app",
+    "healthz_body",
+    "run_http",
+    "run_stdio",
+    "tool_count",
+]
