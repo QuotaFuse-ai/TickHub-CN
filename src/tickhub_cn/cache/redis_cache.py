@@ -19,6 +19,12 @@ TTL = {
     "health": 120,
 }
 
+# Last successful payload per tool call, kept well past the normal TTL. A peer
+# that just started (or one whose upstream is rate-limiting) has no process
+# memory to fall back on; this copy is what lets it answer with the previous
+# real value, clearly marked as degraded, instead of an UnexpectedToolError.
+LAST_GOOD_TTL = 7 * 24 * 3600
+
 
 def params_hash(params: dict[str, Any] | None) -> str:
     if not params:
@@ -86,6 +92,11 @@ class Cache:
         self.misses = 0
         self._locks: dict[str, threading.Lock] = {}
         self._lock_guard = threading.Lock()
+        # One producer per cache key: concurrent callers of the same tool would
+        # otherwise all miss and all hit the endpoint gate, and every one after
+        # the first would be paced into QFSD-7001.
+        self._flight: dict[str, threading.RLock] = {}
+        self._flight_guard = threading.Lock()
         self._connect()
 
     def _connect(self) -> None:
@@ -109,18 +120,31 @@ class Cache:
     def key(self, domain: str, code: str = "-", granularity: str = "-", params: dict[str, Any] | None = None) -> str:
         return f"qf:{self.env}:cache:{domain}:{code}:{granularity}:{params_hash(params)}"
 
-    def get(self, key: str) -> tuple[Any, bool]:
+    @property
+    def backend(self) -> str:
+        return "redis" if self.redis_ok and self.redis is not None else "memory"
+
+    def _load(self, key: str) -> Any:
         if self.redis_ok and self.redis is not None:
             try:
                 raw = self.redis.get(key)
-                if raw is None:
-                    self.misses += 1
-                    return None, False
-                self.hits += 1
-                return json.loads(raw), True
+                if raw is not None:
+                    return json.loads(raw)
             except Exception:
                 self.redis_ok = False
-        value = self.memory.get(key)
+        return self.memory.get(key)
+
+    def _save(self, key: str, value: Any, ttl: int) -> None:
+        if self.redis_ok and self.redis is not None:
+            try:
+                self.redis.setex(key, ttl, json.dumps(value, ensure_ascii=False, default=str))
+                return
+            except Exception:
+                self.redis_ok = False
+        self.memory.set(key, value, ttl)
+
+    def get(self, key: str) -> tuple[Any, bool]:
+        value = self._load(key)
         if value is None:
             self.misses += 1
             return None, False
@@ -128,14 +152,42 @@ class Cache:
         return value, True
 
     def set(self, key: str, value: Any, ttl: int = TTL["semi_static"]) -> None:
-        blob = json.dumps(value, ensure_ascii=False, default=str)
-        if self.redis_ok and self.redis is not None:
-            try:
-                self.redis.setex(key, ttl, blob)
-                return
-            except Exception:
-                self.redis_ok = False
-        self.memory.set(key, value, ttl)
+        self._save(key, value, ttl)
+
+    # ---------------------------------------------------------------- last good
+
+    def last_good_key(self, key: str) -> str:
+        return key.replace(":cache:", ":lastgood:", 1)
+
+    def remember_last_good(self, key: str, payload: Any) -> None:
+        """Persist a successful payload beyond its cache TTL (best effort)."""
+        try:
+            self._save(self.last_good_key(key), {"stored_at": time.time(), "payload": payload}, LAST_GOOD_TTL)
+        except Exception:
+            pass
+
+    def last_good(self, key: str) -> tuple[Any, float] | None:
+        """Return ``(payload, stored_at_epoch)`` for the last successful call."""
+        try:
+            record = self._load(self.last_good_key(key))
+        except Exception:
+            return None
+        if not isinstance(record, dict) or "payload" not in record:
+            return None
+        try:
+            stored_at = float(record.get("stored_at") or 0.0)
+        except (TypeError, ValueError):
+            stored_at = 0.0
+        return record["payload"], stored_at
+
+    def _flight_lock(self, key: str) -> threading.RLock:
+        with self._flight_guard:
+            lock = self._flight.get(key)
+            if lock is None:
+                if len(self._flight) >= 2048:
+                    self._flight.clear()
+                lock = self._flight[key] = threading.RLock()
+            return lock
 
     def delete(self, key: str) -> None:
         if self.redis_ok and self.redis is not None:
@@ -150,23 +202,39 @@ class Cache:
             value, hit = self.get(key)
             if hit:
                 return value, True
-        value = producer()
-        self.set(key, value, ttl)
-        return value, False
+        with self._flight_lock(key):
+            # Re-check under the lock without counting a second miss: the
+            # producer we were waiting on may have just filled the cache.
+            if not refresh:
+                value = self._load(key)
+                if value is not None:
+                    self.hits += 1
+                    return value, True
+            value = producer()
+            self.set(key, value, ttl)
+            return value, False
 
     def flush(self, prefix: str | None = None) -> int:
-        pattern = f"qf:{self.env}:cache:{prefix or ''}*"
+        # An explicit flush means "forget this data", so the durable last-good
+        # copies go with it — otherwise a bad payload would resurface as a
+        # degraded answer once the endpoint is rate-limited.
+        patterns = [
+            f"qf:{self.env}:cache:{prefix or ''}*",
+            f"qf:{self.env}:lastgood:{prefix or ''}*",
+        ]
         removed = 0
         if self.redis_ok and self.redis is not None:
             try:
-                keys = list(self.redis.scan_iter(match=pattern, count=500))
-                if keys:
-                    removed += int(self.redis.delete(*keys))
+                for pattern in patterns:
+                    keys = list(self.redis.scan_iter(match=pattern, count=500))
+                    if keys:
+                        removed += int(self.redis.delete(*keys))
             except Exception:
                 self.redis_ok = False
-        for key in self.memory.keys(f"qf:{self.env}:cache:{prefix or ''}"):
-            self.memory.delete(key)
-            removed += 1
+        for pattern in patterns:
+            for key in self.memory.keys(pattern.rstrip("*")):
+                self.memory.delete(key)
+                removed += 1
         return removed
 
     def stats(self) -> dict[str, Any]:

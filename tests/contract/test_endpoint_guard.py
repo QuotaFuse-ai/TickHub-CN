@@ -146,7 +146,9 @@ def probe_tool():
     def _probe(code: str = "X") -> dict:
         """Probe tool."""
         calls["n"] += 1
-        if calls["n"] > 1:
+        if calls.get("delay"):
+            time.sleep(calls["delay"])
+        if calls["n"] > calls.get("fail_from", 1):
             raise TickHubError("QFSD-7001", "blocked", detail={"retry_after_s": 600})
         return {"ok": True, "data": {"value": 1}, "meta": {"source": "probe"}}
 
@@ -180,3 +182,40 @@ def test_wrapper_raises_when_nothing_was_ever_cached(probe_tool):
     with pytest.raises(TickHubError) as err:
         fn(code="X")
     assert err.value.code == "QFSD-7001"
+
+
+def test_last_good_survives_a_process_restart(probe_tool):
+    """A fresh process has an empty _LAST_GOOD but the cache backend does not."""
+    fn, calls = probe_tool
+    first = fn(code="X")
+    assert first["data"] == {"value": 1}
+
+    with base_mod._LAST_GOOD_LOCK:
+        base_mod._LAST_GOOD.clear()  # simulate a newly started peer process
+
+    stale = fn(code="X", _refresh=True)
+    assert calls["n"] == 2
+    assert stale["data"] == {"value": 1}
+    assert stale["meta"]["degraded"] == "stale_cache"
+    assert stale["meta"]["last_good_source"] in {"redis", "memory"}
+    assert stale["meta"]["stale_age_s"] >= 0
+    assert stale["meta"]["retry_after_s"] == 600
+
+
+def test_public_refresh_control_bypasses_the_cache(probe_tool):
+    fn, calls = probe_tool
+    fn(code="X")
+    stale = fn(code="X", refresh=True)
+    assert calls["n"] == 2
+    assert stale["meta"]["stale"] is True
+
+
+def test_concurrent_identical_calls_share_one_upstream_producer(probe_tool):
+    from concurrent.futures import ThreadPoolExecutor
+
+    fn, calls = probe_tool
+    calls["delay"] = 0.2
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: fn(code="Y"), range(6)))
+    assert calls["n"] == 1
+    assert all(r["data"] == {"value": 1} for r in results)
