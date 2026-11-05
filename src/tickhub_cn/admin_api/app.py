@@ -25,6 +25,7 @@ from ..cache.redis_cache import get_cache
 from ..core.config import SECRET_HINTS, Settings, get_settings
 from ..core.http import HEALTH, read_health_state
 from ..logging.setup import audit, get_logger
+from ..proxy.exit import resolve_provider, safe_url
 from ..proxy.pool import (
     add_proxy_node,
     describe_entries,
@@ -367,11 +368,24 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
     def proxy_list(request: Request) -> dict[str, Any]:
         auth(request)
         nodes = describe_entries(settings)
+        commercial_url = str(settings.proxy_commercial_url or "")
+        whitelist = [
+            item.strip() for item in str(settings.proxy_commercial_whitelist or "").split(",") if item.strip()
+        ]
         return {
             "ok": True,
             "enabled": bool(settings.proxy_pool_enable and any(n["enabled"] for n in nodes)),
             "config_enabled": bool(settings.proxy_pool_enable),
             "path": str(Path(settings.proxy_pool_config_path)),
+            "provider": resolve_provider(settings),
+            "pool_url": safe_url(settings.proxy_pool_url),
+            "commercial": {
+                "configured": bool(commercial_url.strip()),
+                "url": safe_url(commercial_url),
+                "has_username": bool(settings.proxy_commercial_username),
+                "has_password": bool(settings.proxy_commercial_password),
+                "whitelist_entries": len(whitelist),
+            },
             "nodes": nodes,
         }
 
@@ -390,7 +404,12 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
         reset_pool()
         nodes = describe_entries(settings)
         audit("proxy.reload", actor=actor, detail={"nodes": len(nodes)})
-        return {"ok": True, "config_enabled": bool(settings.proxy_pool_enable), "nodes": nodes}
+        return {
+            "ok": True,
+            "config_enabled": bool(settings.proxy_pool_enable),
+            "provider": resolve_provider(settings),
+            "nodes": nodes,
+        }
 
     @app.post("/api/proxy/nodes")
     def proxy_add(request: Request, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:

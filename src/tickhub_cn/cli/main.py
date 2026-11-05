@@ -894,12 +894,28 @@ def _config_check_payload() -> dict[str, Any]:
     fm = FieldMap.load(settings.field_map_path)
     add("field_map", "error" if fm.error else "ok", fm.error or f"{len(fm.tools)} tools mapped")
 
+    from ..proxy.exit import resolve_provider
+
+    provider = resolve_provider(settings)
+    if provider == "direct":
+        add("proxy_exit", "ok", "direct (no proxy)")
+    elif provider == "commercial":
+        commercial_url = str(settings.proxy_commercial_url or "").strip()
+        whitelist = [x for x in str(settings.proxy_commercial_whitelist or "").split(",") if x.strip()]
+        detail = "url=set" if commercial_url else "url=EMPTY (falls back to pool)"
+        detail += f" auth={'basic' if settings.proxy_commercial_username else 'none'}"
+        detail += f" whitelist={len(whitelist)}"
+        add("proxy_exit", "ok" if commercial_url else "warn", f"commercial {detail}")
+    else:
+        target = str(settings.proxy_pool_url or "").strip() or settings.proxy_pool_config_path
+        add("proxy_exit", "ok", f"pool -> {target}")
+
     if not settings.proxy_pool_enable:
         add("proxy_pool", "ok", "disabled (PROXY_POOL_ENABLE=false)")
-    elif not Path(settings.proxy_pool_config_path).exists():
+    elif not Path(settings.proxy_pool_config_path).exists() and not str(settings.proxy_pool_url or "").strip():
         add("proxy_pool", "warn", f"missing file: {settings.proxy_pool_config_path}")
     else:
-        add("proxy_pool", "ok", settings.proxy_pool_config_path)
+        add("proxy_pool", "ok", str(settings.proxy_pool_url or settings.proxy_pool_config_path))
 
     if settings.admin_host not in ("127.0.0.1", "::1", "localhost") and not settings.admin_auth_token:
         add("admin", "error", "non-loopback admin host requires ADMIN_AUTH_TOKEN")
