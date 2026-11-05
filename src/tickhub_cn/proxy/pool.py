@@ -400,6 +400,12 @@ def describe_entries(settings: Any | None = None) -> list[dict[str, Any]]:
 
 def load_entries(settings: Any | None = None) -> list[Any]:
     settings = settings or get_settings()
+    pool_url = str(getattr(settings, "proxy_pool_url", "") or "").strip()
+    if pool_url:
+        # A configured gateway is the whole pool. File entries are deliberately
+        # ignored here: they may be commercial exits, and provider=pool must
+        # never silently pick one up.
+        return [{"url": pool_url}]
     path = Path(settings.proxy_pool_config_path)
     if path.exists():
         try:

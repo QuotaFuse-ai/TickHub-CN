@@ -148,6 +148,10 @@ def test_retry_skips_the_node_that_just_failed(monkeypatch):
     monkeypatch.setattr(http_mod, "_session_for", lambda source: _FlakySession())
     monkeypatch.setattr(http_mod.time, "sleep", lambda seconds: None)
     monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
+    monkeypatch.setattr(
+        "tickhub_cn.proxy.exit.get_settings",
+        lambda: SimpleNamespace(proxy_provider="pool", proxy_pool_enable=True, proxy_pool_url="", proxy_url=""),
+    )
 
     resp = http_mod.fetch("testproxy", "GET", "http://example.invalid/x", retries=1)
 

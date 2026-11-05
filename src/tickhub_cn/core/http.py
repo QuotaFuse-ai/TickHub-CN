@@ -577,20 +577,19 @@ def read_endpoint_counters(
 def _proxy_for(
     source: str, exclude: set[str] | frozenset[str] = frozenset()
 ) -> tuple[dict[str, str] | None, Any | None]:
-    """Return ``(proxies, node)``; ``node`` is set only when the pool supplied it.
+    """Return ``(proxies, node)`` from the configured exit provider.
 
-    ``exclude`` lists node ids that already failed earlier in this request.
+    Provider selection (pool / commercial / direct) lives in ``proxy.exit`` and
+    is driven entirely by settings; ``node`` is set only when the pool supplied
+    the exit, so retries can skip it.
     """
-    settings = get_settings()
     try:
-        from ..proxy.pool import get_pool
+        from ..proxy.exit import select_exit
 
-        pool = get_pool()
-        node = pool.acquire(exclude)
-        if node:
-            return node.as_requests_proxy(), node
-    except Exception:
+        return select_exit(exclude)
+    except Exception:  # noqa: BLE001 - never break fetching over exit plumbing
         pass
+    settings = get_settings()
     if settings.proxy_url:
         return {"http": settings.proxy_url, "https": settings.proxy_url}, None
     return None, None
