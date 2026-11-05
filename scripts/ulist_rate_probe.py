@@ -1,7 +1,13 @@
 """单路径限速探针：东财 ``push2`` ``ulist.np`` 的安全请求间隔（QUOT-407）。
 
-按老板 2026-11-05 授权的阶梯测：0.02 / 0.05 / 0.1 / 0.2 req/s（50s / 20s / 10s / 5s），
-每档 ≥10 分钟且 ≥60 次请求；任一阵出现风控信号即停并回落到上一档。
+2026-11-05 老板口径：当前阶段用 **15 秒档**（15 / 30 / 60），次数 = 600 秒 ÷ 间隔、
+时长一律 ≥10 分钟；秒级档（5s / 1s）保留在 ``SECOND_LEVEL_STAGES`` 里，等商业代理池
+上线再启用（启用时次数回到 ≥60）。
+
+两种模式：
+
+- ``rate``（默认）：遇到风控信号立即中止并回落到上一档，用于求安全速率；
+- ``census``：已知出口被上游拒绝时，按授权把计划数采满，失败逐条记因，不做速率判定。
 
 刻意不 import ``tickhub_cn``：探针要测的就是生产闸门（25s / 3 次每 60s）**以下**的速率，
 走 ``fetch`` 会先被闸门拦下；同时避免在进程内 trip 真实的 ``ENDPOINT_BREAKER``。
@@ -46,13 +52,16 @@ FIELDS = "f12,f14,f2,f3,f62,f184"
 EXPECTED_ROWS = 150
 CST = timezone(timedelta(hours=8))
 
-# 授权阶梯：秒/请求。
-STAGES = (50.0, 20.0, 10.0, 5.0)
+# 授权阶梯：秒/请求。秒级档（5 / 1）保留在代码里，等商业代理池上线再启用。
+STAGES = (15.0, 30.0, 60.0)
+SECOND_LEVEL_STAGES = (5.0, 1.0)
 DEFAULT_MIN_SECONDS = 600
-DEFAULT_MIN_REQUESTS = 60
+# 次数由档位换算：600 秒 ÷ 间隔（15s→40、30s→20、60s→10）；秒级档自然 ≥60。
+DEFAULT_MIN_REQUESTS = 0
 DEFAULT_COOLDOWN = 600.0
 SAFETY_FACTOR = 2.0
 FLOOR_INTERVAL = 10.0
+MODES = ("rate", "census")
 
 _RESET_ERRNOS = {errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE}
 _RESET_WINERRNOS = {10053, 10054, 10058}
@@ -193,12 +202,13 @@ def _percentile(values: list[float], pct: float) -> float:
 def plan_stage(interval: float, min_seconds: int, min_requests: int) -> tuple[int, float]:
     """返回 (请求数, 实际时长秒)。
 
-    授权同时要求「≥10 分钟」和「≥60 次」；50s 档两者不兼容（60 次要 50 分钟），
-    取较大者，并在计划里把真实总时长摆出来。
+    次数按档位换算：``min_seconds ÷ interval``（15s→40、30s→20、60s→10）；
+    ``min_requests`` 只作下限覆盖。首末样本之间只有 ``(count-1) × interval``，
+    所以 run_stage 末尾会补一段 dwell，让观测窗真的达到 ``min_seconds``。
     """
     by_time = math.ceil(min_seconds / interval)
     count = max(min_requests, by_time)
-    return count, count * interval
+    return count, max(count * interval, float(min_seconds))
 
 
 def _now_cst() -> datetime:
@@ -337,6 +347,7 @@ def run_stage(
     user_agent: str,
     baseline_p95: float | None,
     expected_rows: int,
+    mode: str,
     log,
 ) -> Stage:
     stage = Stage(interval=interval, planned=planned, seconds=seconds, expected_rows=expected_rows)
@@ -352,7 +363,7 @@ def run_stage(
         stage.samples.append(sample)
         if sample.kind == "ok":
             consecutive_fail = 0
-            short_streak = short_streak + 1 if (sample.rows or 0) < EXPECTED_ROWS else 0
+            short_streak = short_streak + 1 if (sample.rows or 0) < expected_rows else 0
         else:
             consecutive_fail += 1
             short_streak = 0
@@ -361,19 +372,36 @@ def run_stage(
             f"rows={sample.rows if sample.rows is not None else '-'}"
             + (f" {sample.error}" if sample.error else "")
         )
+        # census：已知出口被拒时按授权继续采满计划数，失败逐条记因，不做速率判定。
+        if mode == "census":
+            continue
         reason = _abort_reason(stage, consecutive_fail, short_streak, baseline_p95)
         if reason:
             stage.aborted = reason
             stage.abort_at = index + 1
             log(f"  中止：{reason}")
             break
+    # 首末样本只隔 (n-1)×interval，补 dwell 让观测窗达到授权要求的时长。
+    remaining = seconds - (time.monotonic() - started)
+    if remaining > 0:
+        log(f"  收尾观测 {remaining:.0f}s（凑满 {seconds / 60:.1f} 分钟窗口）")
+        time.sleep(remaining)
     return stage
 
 
-def verdict(summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    baseline_p95 = next((s["p95_ms"] for s in summaries if s["interval_s"] == STAGES[0] and s["p95_ms"]), None)
+def verdict(summaries: list[dict[str, Any]], mode: str = "rate") -> dict[str, Any]:
+    if mode == "census":
+        return {
+            "safe_interval_s": None,
+            "recommended_interval_s": None,
+            "supports_second_level": False,
+            "note": "census 模式只记录逐条失败明细，不做安全档判定",
+        }
+    # 慢 → 快逐档看：第一档失败即停，安全的档位取「最快且仍通过」的那个。
+    ordered = sorted(summaries, key=lambda s: -s["interval_s"])
+    baseline_p95 = next((s["p95_ms"] for s in ordered if s["p95_ms"]), None)
     safe: dict[str, Any] | None = None
-    for summary in summaries:
+    for summary in ordered:
         if summary["aborted"]:
             break
         if summary["fail"] or summary["reset"] or summary["blocked"]:
@@ -398,9 +426,9 @@ def verdict(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         "recommended_interval_s": recommended,
         "supports_second_level": recommended <= FLOOR_INTERVAL,
         "note": (
-            "安全档 5s → 上线 10s，秒级可行，需另出「调度与面板推送」设计"
+            f"安全档 {safe['interval_s']:.0f}s → 上线 {recommended:.0f}s，秒级可行，需另出「调度与面板推送」设计"
             if recommended <= FLOOR_INTERVAL
-            else f"安全档 {safe['interval_s']}s → 上线 {recommended:.0f}s，维持分钟级"
+            else f"安全档 {safe['interval_s']:.0f}s → 上线 {recommended:.0f}s，维持分钟级"
         ),
         "baseline_p95_ms": baseline_p95,
     }
@@ -409,7 +437,7 @@ def verdict(summaries: list[dict[str, Any]]) -> dict[str, Any]:
 def render_markdown(stages: list[Stage], result: dict[str, Any], meta: dict[str, Any]) -> str:
     lines = ["# QUOT-407 ulist.np 限速压测结果", ""]
     lines.append(f"- 开始：{meta['started_at']}（CST）  结束：{meta['finished_at']}（CST）")
-    lines.append(f"- 出口：{meta['egress']}  目标：{ULIST_URL}  每请求 {meta['codes']} 只")
+    lines.append(f"- 模式：{meta.get('mode', 'rate')}  出口：{meta['egress']}  目标：{ULIST_URL}  每请求 {meta['codes']} 只")
     lines.append(f"- 主机解析：{meta['resolved_ip']}  基线 p95：{meta.get('baseline_p95_ms') or '-'} ms")
     lines.append("")
     lines.append("| 间隔 | 计划 | 实际 | 成功 | 失败 | reset | 429/403 | 5xx | 行数不足 | p50 | p95 | 中止 |")
@@ -449,9 +477,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QUOT-407 单路径限速探针（只读，不改闸门常量）")
     parser.add_argument("--codes", help="逗号分隔 secid，如 1.600000,0.000001")
     parser.add_argument("--codes-file", help="secid 列表文件（逗号或换行分隔）")
-    parser.add_argument("--stages", default=",".join(str(int(s)) for s in STAGES), help="阶梯间隔秒，默认 50,20,10,5")
+    parser.add_argument("--stages", default=",".join(str(int(s)) for s in STAGES), help="阶梯间隔秒，默认 15,30,60")
     parser.add_argument("--min-seconds", type=int, default=DEFAULT_MIN_SECONDS)
-    parser.add_argument("--min-requests", type=int, default=DEFAULT_MIN_REQUESTS)
+    parser.add_argument("--min-requests", type=int, default=DEFAULT_MIN_REQUESTS, help="次数下限覆盖；默认按 600÷间隔 换算")
+    parser.add_argument("--mode", choices=MODES, default="rate", help="rate=遇信号即停；census=已知出口被拒时采满计划数并逐条记因")
     parser.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN, help="档间冷却秒，默认 600")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--proxy", help="独立测试出口，如 http://10.0.0.9:3128")
@@ -467,7 +496,11 @@ def main(argv: list[str] | None = None) -> int:
     plans = [(interval, *plan_stage(interval, args.min_seconds, args.min_requests)) for interval in intervals]
     total_requests = sum(item[1] for item in plans)
     total_seconds = sum(item[2] for item in plans) + args.cooldown * max(0, len(plans) - 1)
-    resolved = socket.gethostbyname(urllib.parse.urlparse(ULIST_URL).hostname or "")
+    try:
+        resolved = socket.gethostbyname(urllib.parse.urlparse(ULIST_URL).hostname or "")
+    except OSError as exc:
+        # DNS 失败本身也是出口证据，不能让它把整轮压测打挂。
+        resolved = f"unresolved: {exc}"
 
     print(f"目标：{ULIST_URL}")
     print(f"每请求 {len(secids)} 只；预计 {total_requests} 次请求，含冷却约 {total_seconds / 60:.1f} 分钟")
@@ -510,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
             user_agent=args.user_agent,
             baseline_p95=baseline_p95,
             expected_rows=expected,
+            mode=args.mode,
             log=print,
         )
         stages.append(stage)
@@ -521,10 +555,11 @@ def main(argv: list[str] | None = None) -> int:
             break
 
     summaries = [stage.summary() for stage in stages]
-    result = verdict(summaries)
+    result = verdict(summaries, args.mode)
     meta = {
         "started_at": started_at,
         "finished_at": _now_cst().isoformat(timespec="seconds"),
+        "mode": args.mode,
         "egress": args.proxy or "直连",
         "resolved_ip": resolved,
         "codes": len(secids),

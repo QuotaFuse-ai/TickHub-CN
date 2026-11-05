@@ -56,6 +56,21 @@ def test_stage_plan_honours_both_minimums():
     assert probe.plan_stage(1.0, 600, 60) == (600, 600.0)
 
 
+def test_stage_plan_follows_authorised_tier_conversion():
+    assert probe.plan_stage(15.0, 600, 0) == (40, 600.0)
+    assert probe.plan_stage(30.0, 600, 0) == (20, 600.0)
+    assert probe.plan_stage(60.0, 600, 0) == (10, 600.0)
+    baseline = [stage.summary() for stage in (_stage(15.0, 40), _stage(30.0, 20), _stage(60.0, 10))]
+    assert probe.verdict(baseline)["safe_interval_s"] == 15.0
+
+
+def test_verdict_in_census_mode_makes_no_rate_claim():
+    stage = _stage(15.0, 40, kind="reset", rows=0)
+    result = probe.verdict([stage.summary()], mode="census")
+    assert result["safe_interval_s"] is None
+    assert "census" in result["note"]
+
+
 def test_abort_on_first_reset():
     stage = _stage(10.0, 1, kind="reset", rows=0)
     assert probe._abort_reason(stage, 1, 0, baseline_p95=100.0) == "连接被重置"
