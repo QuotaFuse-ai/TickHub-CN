@@ -94,7 +94,7 @@ th-cn doctor                  # 环境、缓存后端、数据源体检
 > **② 行情走腾讯源** —— 不封 IP，不需要代理；**③ Redis 可选** —— 没装 Redis 自动用进程内缓存。
 >
 > 已发布到 [PyPI](https://pypi.org/project/tickhub-cn/)，`pip install tickhub-cn` 即装最新版；
-> 需要固定版本就写 `pip install tickhub-cn==1.0.1`。国内网络可加
+> 需要固定版本就写 `pip install tickhub-cn==1.1.0`。国内网络可加
 > `-i https://pypi.tuna.tsinghua.edu.cn/simple`；镜像同步有延迟，若提示找不到版本，
 > 去掉 `-i` 直连官方源即可。离线安装包见
 > [Releases](https://github.com/QuotaFuse-ai/TickHub-CN/releases)。
@@ -266,12 +266,12 @@ th-cn start-all --host 127.0.0.1 --port 8000
 不装 Python 也能跑，镜像已发布到 GitHub Container Registry：
 
 ```bash
-docker pull ghcr.io/quotafuse-ai/tickhub-cn:1.0.1    # 或 :latest
+docker pull ghcr.io/quotafuse-ai/tickhub-cn:1.1.0    # 或 :latest
 
 docker run -d --name tickhub-cn \
   -p 127.0.0.1:8000:8000 \
   -v tickhub-var:/app/var \
-  ghcr.io/quotafuse-ai/tickhub-cn:1.0.1
+  ghcr.io/quotafuse-ai/tickhub-cn:1.1.0
 # MCP 端点：http://127.0.0.1:8000/mcp
 ```
 
@@ -283,7 +283,7 @@ docker run -d -p 127.0.0.1:8000:8000 \
   -e OFFLINE_CRAWLER_ENABLE=true \
   -e OFFLINE_CRAWLER_CRON="0 2 * * *" \
   -v tickhub-var:/app/var \
-  ghcr.io/quotafuse-ai/tickhub-cn:1.0.1 \
+  ghcr.io/quotafuse-ai/tickhub-cn:1.1.0 \
   start-all --host 0.0.0.0 --port 8000 --crawler on
 ```
 
@@ -309,7 +309,7 @@ docker compose up -d --build                    # 或本地构建
 自己构建镜像：
 
 ```bash
-docker build -t tickhub-cn:1.0.1 .
+docker build -t tickhub-cn:1.1.0 .
 ```
 
 发布新镜像走手动触发的 workflow **Docker image (GHCR)**（`.github/workflows/docker.yml`），
@@ -1360,7 +1360,7 @@ CI 的实际 job（4 个矩阵组合 + catalog 比对）、与之一一对应的
 
 ## 发布
 
-**PyPI**（已上线，当前 `1.0.1`）：
+**PyPI**（已上线，当前 `1.1.0`）：
 
 - 常规发布：GitHub → *Actions* → **Publish to PyPI** → *Run workflow*，选 `pypi` 或 `testpypi`。走 Trusted Publishing（OIDC），仓库不存任何密钥。
 - 一次性配置（已完成，换项目/环境时需要）：PyPI → *Publishing* → *Add a new pending publisher*，填 project `tickhub-cn`、owner `QuotaFuse-ai`、repo `TickHub-CN`、workflow `publish.yml`、environment `pypi`；TestPyPI 用环境 `testpypi`（独立账号）。

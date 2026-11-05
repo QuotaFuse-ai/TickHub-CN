@@ -290,7 +290,14 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "version": __version__}
+        # 统一形状供 LadderStock 版本检测用（QUOT-401）：status/service/version 三件套。
+        # 保留 ok 字段兼容既有探活脚本。
+        return {
+            "ok": True,
+            "status": "ok",
+            "service": "tickhub-cn",
+            "version": __version__,
+        }
 
     # ------------------------------------------------------------- dashboard
 

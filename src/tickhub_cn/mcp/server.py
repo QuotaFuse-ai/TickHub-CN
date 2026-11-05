@@ -9,12 +9,16 @@ stdio or Streamable HTTP.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import functools
+import json
+from typing import Any, Callable
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import __version__
 from ..core.config import get_settings
+from ..core.errors import TickHubError
 from ..logging.setup import get_logger
 
 INSTRUCTIONS = """\
@@ -29,11 +33,38 @@ Rules for callers:
   fields="a,b"    project the response to those fields
   tier=brief      output granularity: brief | medium | full (full is default)
   data_as_of=ISO  point-in-time view: drop rows published after that moment
-  _refresh=true   bypass cache and refetch
-  _no_cache=true  skip cache for this call
+  refresh=true    bypass cache and refetch
+  no_cache=true   skip cache for this call
+
+  A payload with meta.degraded="stale_cache" is the last successful value, not
+  a fresh read: check meta.stale_age_s and retry after meta.retry_after_s.
+  Failures start with their QFSD code (QFSD-7001 paced/breaker, QFSD-9001 bad
+  arguments); do not read a QFSD code as a missing tool.
 - Call `doctor`-style diagnostics from the CLI (th-cn doctor) when a source
   looks stale rather than retrying blindly.
 """
+
+
+def surfaced(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Raise ``TickHubError`` as an MCP ``ToolError`` that keeps its QFSD code.
+
+    Without this the SDK turns every domain error into ``Error executing tool
+    <name>``: the caller cannot tell QFSD-7001 (paced, retry later) from
+    QFSD-9001 (bad arguments) and reads both as a broken tool.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except TickHubError as exc:
+            detail = json.dumps(exc.detail, ensure_ascii=False, default=str) if exc.detail else ""
+            message = f"{exc.code}: {exc.message}"
+            if detail:
+                message = f"{message} {detail}"
+            raise ToolError(message) from exc
+
+    return wrapper
 
 
 def build_server(*, include_aliases: bool = True, log_level: str | None = None) -> MCPServer:
@@ -52,13 +83,13 @@ def build_server(*, include_aliases: bool = True, log_level: str | None = None) 
     )
     for name in sorted(REGISTRY):
         spec = REGISTRY[name]
-        server.add_tool(spec.func, name=name, description=spec.description or name)
+        server.add_tool(surfaced(spec.func), name=name, description=spec.description or name)
     if include_aliases:
         for alias in sorted(ALIASES):
             target = ALIASES[alias]
             spec = REGISTRY[target]
             server.add_tool(
-                spec.func,
+                surfaced(spec.func),
                 name=alias,
                 description=f"{spec.description or target} (compatibility alias of {target})",
             )

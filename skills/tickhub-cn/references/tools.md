@@ -86,9 +86,9 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `margin_market` | `days` | 86400 | Market-wide margin balance history. |
 | `margin_trading_backup` | `trade_date`, `exchange`, `code`, `max_pages` | 86400 | Exchange-official margin trading table (SSE / SZSE), normalised to 元 and 股; SZSE publishes T+1, so an implicit date backs off one trading day. |
 | `northbound_flow` | `history`, `days` | 60 | Northbound / southbound intraday net flow; ``history=True`` gives daily turnover history. |
-| `realtime_fund_flow` | `code` | 60 | Realtime snapshot of one stock's main-capital flow. |
+| `realtime_fund_flow` | `code` | 60 | Realtime snapshot of one stock's main-capital flow: amounts in 元 (CNY), ratios in %; same 东财 ulist endpoint and field numbers as ``stock_fund_flow_batch``, so one call equals that code's batch row at the same moment. |
 | `stock_fund_flow` | `code`, `days` | 60 | Daily main/small/medium/large/super-large net inflow for one stock. |
-| `stock_fund_flow_batch` | `codes`, `max_codes` | 60 | Batch 当日实时 main-capital flow: one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call. |
+| `stock_fund_flow_batch` | `codes`, `max_codes` | 60 | Batch 当日实时 main-capital flow (amounts in 元, ratios in %): one 东财 ulist request per max_codes codes, further codes auto-batched; the cache is keyed by the whole codes set, so another set is a fresh upstream call. |
 
 ## Macro & rates (`macro`)
 

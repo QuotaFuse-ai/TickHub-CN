@@ -94,7 +94,9 @@ def test_flush_clears_matching_domain(upstream: list[str]) -> None:
     removed = get_cache().flush("quote")
     after = quotes.tencent_quote("600000")
 
-    assert removed == 1
+    # Cache entry + durable last-good copy: an explicit flush must drop both,
+    # otherwise bad data would come back as a degraded answer.
+    assert removed == 2
     assert after["meta"]["cache_hit"] is False
     assert len(upstream) == 2
 

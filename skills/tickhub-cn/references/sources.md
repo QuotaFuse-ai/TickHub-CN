@@ -81,6 +81,19 @@ Volumes from other providers are passed through as published; state the unit
 you see rather than assuming one. The same applies to `amount`: Tencent quote
 publishes 万元, other providers publish yuan.
 
+**Capital flow is unified to 元.** `realtime_fund_flow`, `stock_fund_flow` and
+`stock_fund_flow_batch` all publish amounts in 元 and ratios as plain
+percentages. `realtime_fund_flow` and `stock_fund_flow_batch` read the **same**
+东财 endpoint (`push2.eastmoney.com/api/qt/ulist.np/get`, `fltt=2&invt=2`) and the
+same field numbers — `f62`/`f184` for main capital, `f66`/`f69` super-large,
+`f72`/`f75` large, `f78`/`f81` medium, `f84`/`f87` small — so a single-stock call
+equals that code's batch row at the same moment (measured: 30/30 codes, 0 元
+difference).
+
+Do **not** read capital-flow columns from `push2/api/qt/stock/get`: that endpoint
+answers a different scale for `f62`/`f184` (the sign can flip) and omits
+`f66`/`f72`, so `fltt`/`invt` alone only fixes `price`. That was QUOT-368.
+
 Percentages are plain numbers (`6.2` means 6.2%), never strings. Missing
 values are `null`, never `0` or `""`.
 
