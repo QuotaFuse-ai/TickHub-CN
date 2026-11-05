@@ -136,10 +136,13 @@ ENDPOINT_BREAKER_SECONDS = 600.0
 # Longest a tool call may block on the endpoint gate before degrading instead.
 ENDPOINT_MAX_WAIT = 2.0
 # A reset is not proof of an upstream ban: one bad proxy exit looks the same.
-# Fail over once; trip only when the retry on another exit also resets, or when
-# no healthy alternative exists. A reset that recovered on another exit is
-# evidence against that proxy node, never against the upstream family, so a
-# recovered reset never counts toward a trip.
+# Fail over once; trip when the retry resets too, or when no healthy alternative
+# exists. A reset that recovered on another exit is evidence against that proxy
+# node, never against the upstream family; one that failed over and still did
+# not recover accumulates per family, and 3 inside 60s trip it (approved
+# QUOT-407 semantics §1.1, condition 2).
+ENDPOINT_RESET_WINDOW = 60.0
+ENDPOINT_RESET_TRIP = 3
 
 
 def endpoint_family(url: str) -> str | None:
@@ -175,11 +178,18 @@ class EndpointBreaker:
     fails over once and only trips when the retry on another exit resets too, or
     when no healthy alternative exists. A reset that recovered on another exit is
     attributed to that node and never counted as evidence against the family.
+
+    Resets whose failover did not recover are a different signal: they mean the
+    family kept resetting us even after the exit changed. Those accumulate per
+    family, and ``ENDPOINT_RESET_TRIP`` of them inside ``ENDPOINT_RESET_WINDOW``
+    trip the family (QUOT-407 semantics §1.1, condition 2). One call contributes
+    at most one count.
     """
 
     def __init__(self, cooldown: float = ENDPOINT_BREAKER_SECONDS) -> None:
         self.cooldown = cooldown
         self._until: dict[str, float] = {}
+        self._unrecovered: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     def remaining(self, family: str) -> float:
@@ -198,6 +208,27 @@ class EndpointBreaker:
             self._until[family] = time.monotonic() + self.cooldown
             return self.cooldown
 
+    def note_unrecovered_reset(self, family: str) -> int:
+        """Count one reset whose failover did not recover; return the window total."""
+        now = time.monotonic()
+        with self._lock:
+            stamps = self._unrecovered.setdefault(family, deque())
+            while stamps and now - stamps[0] > ENDPOINT_RESET_WINDOW:
+                stamps.popleft()
+            stamps.append(now)
+            return len(stamps)
+
+    def window_resets(self, family: str) -> int:
+        """Unrecovered resets still inside the window (read-only)."""
+        now = time.monotonic()
+        with self._lock:
+            stamps = self._unrecovered.get(family)
+            if not stamps:
+                return 0
+            while stamps and now - stamps[0] > ENDPOINT_RESET_WINDOW:
+                stamps.popleft()
+            return len(stamps)
+
     def open_families(self) -> dict[str, int]:
         with self._lock:
             now = time.monotonic()
@@ -210,6 +241,7 @@ class EndpointBreaker:
     def reset(self) -> None:
         with self._lock:
             self._until.clear()
+            self._unrecovered.clear()
 
 
 ENDPOINT_BREAKER = EndpointBreaker()
@@ -639,11 +671,12 @@ def fetch(
     non-trading day apart from a broken endpoint.
 
     push2 quote paths get an extra guard: a per-path rate gate plus a breaker
-    that opens only after a reset is confirmed by a second exit, or when no
-    healthy alternative exists. A reset that recovered on another exit is
-    evidence against that proxy node, not the upstream family. While open,
-    calls raise ``QFSD-7001`` before any retry, so the tool wrapper can serve
-    stale cache.
+    that opens when the failover retry resets too, when no healthy alternative
+    exists, or when resets that failed over and still did not recover reach
+    ``ENDPOINT_RESET_TRIP`` inside ``ENDPOINT_RESET_WINDOW``. A reset that
+    recovered on another exit is evidence against that proxy node, not the
+    upstream family. While open, calls raise ``QFSD-7001`` before any retry, so
+    the tool wrapper can serve stale cache.
     """
     settings = get_settings()
     timeout = timeout or settings.http_timeout
@@ -681,6 +714,8 @@ def fetch(
     last_err: Exception | None = None
     tried: set[str] = set()
     reset_failover_used = False
+    reset_pending = False  # the previous attempt reset and this one is its failover
+    reset_counted = False  # this call already contributed one window count
 
     for attempt in range(retries + 1):
         started = time.monotonic()
@@ -726,6 +761,14 @@ def fetch(
             if node is not None and (reset or isinstance(exc, PROXY_FAULTS)):
                 _mark_node(node, False)
                 tried.add(node.id)
+            if family and reset_pending:
+                # The previous attempt reset and failed over to this exit, and
+                # this except block means it did not answer 200: that reset did
+                # not recover. Count one window event for this call, never two.
+                if not reset_counted:
+                    ENDPOINT_BREAKER.note_unrecovered_reset(family)
+                    reset_counted = True
+                reset_pending = False
             if reset:
                 # Only an untried exit makes this reset inconclusive. If the
                 # failover answer is another reset, that second reset trips;
@@ -738,8 +781,14 @@ def fetch(
                 )
                 if can_failover:
                     reset_failover_used = True
+                    reset_pending = True
                     endpoint_limiter(family).note_extra_call()
                     continue
+                # No failover left, so this call's reset is unrecovered. Count
+                # it once; a second reset in the same call must not add another.
+                if family and not reset_counted:
+                    ENDPOINT_BREAKER.note_unrecovered_reset(family)
+                    reset_counted = True
                 ENDPOINT_BREAKER.trip(family)
                 root = _root_transport_error(exc)
                 raise TickHubError(
@@ -755,6 +804,29 @@ def fetch(
                     },
                     retryable=True,
                 ) from exc
+            if family and reset_counted:
+                # Backstop behind the failover rule: a call that reset and did
+                # not recover on its failover is one event, and 3 such calls in
+                # 60s mean the family keeps resetting us regardless of the exit.
+                recent = ENDPOINT_BREAKER.window_resets(family)
+                if recent >= ENDPOINT_RESET_TRIP:
+                    ENDPOINT_BREAKER.trip(family)
+                    root = _root_transport_error(exc)
+                    raise TickHubError(
+                        "QFSD-7001",
+                        f"{family} 60 秒内连接重置 {recent} 次未恢复，"
+                        f"已熔断 {int(ENDPOINT_BREAKER_SECONDS)} 秒",
+                        detail={
+                            "url": url,
+                            "endpoint": family,
+                            "reason": "endpoint_breaker",
+                            "retry_after_s": int(ENDPOINT_BREAKER_SECONDS),
+                            "resets_in_window": recent,
+                            "error": root.__class__.__name__,
+                            "errno": _errno_of(root),
+                        },
+                        retryable=True,
+                    ) from exc
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 4) + random.uniform(0, 0.3))
                 continue

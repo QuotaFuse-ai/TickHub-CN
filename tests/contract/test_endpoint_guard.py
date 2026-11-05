@@ -71,6 +71,45 @@ class _AlternatingSession:
         return _OkResponse()
 
 
+class _StatusResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.text = "{}"
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ResetThenServerErrorSession:
+    """Resets the first attempt of every call, then answers HTTP 500."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        self.calls += 1
+        self.exits.append(str((proxies or {}).get("https", "")))
+        if self.calls % 2 == 1:
+            raise requests.ConnectionError("Connection reset by peer")
+        return _StatusResponse(500)
+
+
+class _TwoResetsOneCallSession:
+    """One call: reset, HTTP 500, reset — two resets without a recovery."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        self.calls += 1
+        self.exits.append(str((proxies or {}).get("https", "")))
+        if self.calls in (1, 3):
+            raise requests.ConnectionError("Connection reset by peer")
+        return _StatusResponse(500)
+
+
 @pytest.fixture(autouse=True)
 def clean_guard():
     http_mod.reset_endpoint_guard()
@@ -220,6 +259,52 @@ def test_resets_that_recovered_on_another_exit_never_trip_the_family(monkeypatch
 
     assert http_mod.ENDPOINT_BREAKER.open_families() == {}
     assert len(session.exits) == 6  # each round resets once, then fails over
+
+
+def test_three_unrecovered_resets_across_calls_trip_the_family(monkeypatch):
+    """Condition 2: one reset per call, none recovered, 3 calls inside 60s."""
+    pool, (first, second) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _ResetThenServerErrorSession()
+    _offline_pool(monkeypatch, session, pool)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    family = http_mod.endpoint_family(url)
+
+    for _ in range(2):
+        with pytest.raises(TickHubError) as err:
+            http_mod.fetch("eastmoney", "GET", url, retries=1)
+        assert err.value.code == "QFSD-9003"  # the failover answered 500
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 2
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", url, retries=1)
+
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["reason"] == "endpoint_breaker"
+    assert err.value.detail["retry_after_s"] == 600
+    assert err.value.detail["resets_in_window"] == 3
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 3
+    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
+    assert session.exits == [first.requests_url(), second.requests_url()] * 3
+
+
+def test_two_resets_in_one_call_count_as_one_window_event(monkeypatch):
+    """The second reset trips via condition 1; it must not stack condition 2."""
+    pool, (first, second) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _TwoResetsOneCallSession()
+    _offline_pool(monkeypatch, session, pool)
+    monkeypatch.setattr(http_mod.time, "sleep", lambda *_: None)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    family = http_mod.endpoint_family(url)
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", url, retries=2)
+
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["reason"] == "endpoint_breaker"
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 1
+    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
+    assert session.exits == [first.requests_url(), second.requests_url(), second.requests_url()]
 
 
 @pytest.mark.parametrize(
