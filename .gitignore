@@ -39,3 +39,4 @@ _p*.log
 
 # 内部任务记录（含本机路径与网络排查信息），不对外
 docs/tasks/
+dist-build/
