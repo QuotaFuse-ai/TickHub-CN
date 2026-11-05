@@ -181,6 +181,49 @@ def test_resets_are_attributed_to_the_node_that_answered_them(monkeypatch: pytes
     assert (row["attempts"], row["successes"], row["failures"], row["resets"]) == (2, 1, 1, 1)
     assert row["last_reset_node"] == bad.id
     assert session.exits == [bad.requests_url(), good.requests_url()]
+    # The per-node breakdown is the evidence a disabled node stopped carrying
+    # traffic: one attempt each, the only reset on the bad exit.
+    assert row["nodes"][bad.id] == {
+        "node": bad.id,
+        "attempts": 1,
+        "successes": 0,
+        "failures": 1,
+        "resets": 1,
+        "last_reset_at": row["last_reset_at"],
+    }
+    assert row["nodes"][good.id] == {
+        "node": good.id,
+        "attempts": 1,
+        "successes": 1,
+        "failures": 0,
+        "resets": 0,
+        "last_reset_at": None,
+    }
+
+
+def test_a_disabled_node_keeps_its_counts_and_stops_accumulating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabling an exit must freeze its tally while the other one takes the load."""
+    first = ProxyNode(raw="http://127.0.0.1:11")
+    second = ProxyNode(raw="http://127.0.0.1:12")
+    pool = ProxyPool([first, second])
+    monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
+
+    def proxy_for(source: str, exclude: set[str] | frozenset[str] = frozenset()) -> Any:
+        node = pool.acquire(exclude)
+        return node.as_requests_proxy(), node
+
+    _offline(monkeypatch, _OkSession(), proxy_for=proxy_for)
+
+    http_mod.fetch("eastmoney", "GET", ULIST)
+    used, spare = (first, second) if _counters()[FAMILY]["nodes"].get(first.id, {}).get("attempts") else (second, first)
+    before = dict(_counters()[FAMILY]["nodes"][used.id])
+
+    used.enabled = False
+    http_mod.fetch("eastmoney", "GET", ULIST)
+    row = _counters()[FAMILY]
+    assert row["nodes"][used.id] == before
+    assert row["nodes"][spare.id]["attempts"] == 1
+    assert row["attempts"] == 2
 
 
 # ---------------------------------------------------------------- health channel

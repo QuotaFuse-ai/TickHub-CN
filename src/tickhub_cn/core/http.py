@@ -419,27 +419,35 @@ class EndpointCounters:
     150-code refresh that the endpoint answered once reads 1 here even when the
     cache was bypassed and a retry failover happened. ``reset_nodes`` keeps the
     proxy exit each reset came through (``null`` = direct/static proxy) so a
-    single bad node can be told apart from an upstream ban.
+    single bad node can be told apart from an upstream ban. ``nodes`` repeats
+    the same tallies per exit, which is what shows a disabled node stopped
+    carrying traffic instead of merely being skipped once.
     """
 
     last_resets_limit = 10
+    max_nodes = 32
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._families: dict[str, dict[str, Any]] = {}
 
-    def attempt(self, family: str) -> None:
+    def attempt(self, family: str, node_id: str | None = None) -> None:
         with self._lock:
             cur = self._families.setdefault(family, self._blank(family))
             cur["attempts"] += 1
+            self._node(cur, node_id)["attempts"] += 1
 
-    def success(self, family: str) -> None:
+    def success(self, family: str, node_id: str | None = None) -> None:
         with self._lock:
-            self._families.setdefault(family, self._blank(family))["successes"] += 1
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["successes"] += 1
+            self._node(cur, node_id)["successes"] += 1
 
-    def failure(self, family: str) -> None:
+    def failure(self, family: str, node_id: str | None = None) -> None:
         with self._lock:
-            self._families.setdefault(family, self._blank(family))["failures"] += 1
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["failures"] += 1
+            self._node(cur, node_id)["failures"] += 1
 
     def reset(self, family: str, node_id: str | None) -> None:
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -450,6 +458,9 @@ class EndpointCounters:
             cur["last_reset_node"] = node_id
             cur["reset_nodes"].append({"node": node_id, "at": stamp})
             del cur["reset_nodes"][: -self.last_resets_limit]
+            node = self._node(cur, node_id)
+            node["resets"] += 1
+            node["last_reset_at"] = stamp
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
@@ -470,16 +481,38 @@ class EndpointCounters:
             "last_reset_at": None,
             "last_reset_node": None,
             "reset_nodes": [],
+            "nodes": {},
         }
+
+    def _node(self, cur: dict[str, Any], node_id: str | None) -> dict[str, Any]:
+        key = node_id or "direct"
+        row = cur["nodes"].get(key)
+        if row is None:
+            if len(cur["nodes"]) >= self.max_nodes:
+                cur["nodes"].pop(next(iter(cur["nodes"])))
+            row = cur["nodes"][key] = {
+                "node": key,
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "resets": 0,
+                "last_reset_at": None,
+            }
+        return row
 
     @staticmethod
     def _copy(row: dict[str, Any]) -> dict[str, Any]:
         out = dict(row)
         out["reset_nodes"] = [dict(r) for r in row["reset_nodes"]]
+        out["nodes"] = {k: dict(v) for k, v in row["nodes"].items()}
         return out
 
 
 ENDPOINT_COUNTERS = EndpointCounters()
+
+
+def _node_id(node: Any) -> str | None:
+    return node.id if node is not None else None
 
 
 def _read_health_file(path: str | Path | None, *, max_age_s: float = 86400) -> dict[str, Any]:
@@ -662,7 +695,7 @@ def fetch(
         started = time.monotonic()
         proxies, node = _proxy_for(source, tried)
         if family:
-            ENDPOINT_COUNTERS.attempt(family)
+            ENDPOINT_COUNTERS.attempt(family, _node_id(node))
         try:
             resp = _session_for(source).request(
                 method.upper(),
@@ -681,14 +714,14 @@ def fetch(
             if resp.status_code in allow_status:
                 HEALTH.record(source, True, latency)
                 if family:
-                    ENDPOINT_COUNTERS.success(family)
+                    ENDPOINT_COUNTERS.success(family, _node_id(node))
                 return resp
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
             resp.raise_for_status()
             HEALTH.record(source, True, latency)
             if family:
-                ENDPOINT_COUNTERS.success(family)
+                ENDPOINT_COUNTERS.success(family, _node_id(node))
             return resp
         except Exception as exc:  # noqa: BLE001
             latency = (time.monotonic() - started) * 1000
@@ -696,9 +729,9 @@ def fetch(
             HEALTH.record(source, False, latency, str(exc))
             reset = bool(family) and _is_connection_reset(exc)
             if family:
-                ENDPOINT_COUNTERS.failure(family)
+                ENDPOINT_COUNTERS.failure(family, _node_id(node))
                 if reset:
-                    ENDPOINT_COUNTERS.reset(family, node.id if node is not None else None)
+                    ENDPOINT_COUNTERS.reset(family, _node_id(node))
             if node is not None and (reset or isinstance(exc, PROXY_FAULTS)):
                 _mark_node(node, False)
                 tried.add(node.id)
