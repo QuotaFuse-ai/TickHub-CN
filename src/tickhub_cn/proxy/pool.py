@@ -141,6 +141,13 @@ class ProxyPool:
         get_logger("proxy").warning("proxy pool exhausted, direct fallback", extra={"error_code": "QFSD-5001"})
         return None
 
+    def has_alternative(self, exclude: set[str] | frozenset[str] = frozenset()) -> bool:
+        """True when a healthy, enabled exit outside ``exclude`` exists."""
+        with self._lock:
+            return any(
+                node.enabled and node.healthy and node.id not in exclude for node in self.nodes
+            )
+
     def mark(self, node: ProxyNode, ok: bool, latency_ms: float | None = None) -> None:
         disabled = recovered = False
         with self._lock:

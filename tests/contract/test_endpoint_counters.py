@@ -27,6 +27,9 @@ class _NoLimit:
     def acquire(self, *_args: Any, **_kwargs: Any) -> None:
         pass
 
+    def note_extra_call(self) -> None:
+        pass
+
 
 class _Response:
     status_code = 200
@@ -158,28 +161,26 @@ def test_a_direct_request_records_no_node(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_resets_are_attributed_to_the_node_that_answered_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The evidence shape QUOT-370 asks for: one batch, resets only on the bad exit."""
+    """The evidence shape QUOT-370 asks for: one batch, reset only on the bad exit."""
     bad = ProxyNode(raw="http://127.0.0.1:9")
     good = ProxyNode(raw="http://127.0.0.1:10")
     pool = ProxyPool([bad, good])
+    monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
 
     def proxy_for(source: str, exclude: set[str] | frozenset[str] = frozenset()) -> Any:
         node = pool.acquire(exclude)
         return node.as_requests_proxy(), node
 
-    _offline(monkeypatch, _NodeSession(bad.requests_url()), proxy_for=proxy_for)
+    session = _NodeSession(bad.requests_url())
+    _offline(monkeypatch, session, proxy_for=proxy_for)
 
-    with pytest.raises(TickHubError):
-        http_mod.fetch("eastmoney", "GET", ULIST)
-    # A batch path does not run through fetch again while the breaker is open,
-    # so count a sibling family to prove the good node stayed clean.
-    other = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-    http_mod.fetch("eastmoney", "GET", other)
+    resp = http_mod.fetch("eastmoney", "GET", ULIST, retries=2)
+    assert resp.status_code == 200  # answered by the good exit, no per-code degradation
 
-    families = _counters()
-    assert families[FAMILY]["last_reset_node"] == bad.id
-    other_row = families[http_mod.endpoint_family(other)]
-    assert other_row["resets"] == 0 and other_row["successes"] == 1
+    row = _counters()[FAMILY]
+    assert (row["attempts"], row["successes"], row["failures"], row["resets"]) == (2, 1, 1, 1)
+    assert row["last_reset_node"] == bad.id
+    assert session.exits == [bad.requests_url(), good.requests_url()]
 
 
 # ---------------------------------------------------------------- health channel

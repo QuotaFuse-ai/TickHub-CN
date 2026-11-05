@@ -22,6 +22,9 @@ class _NoLimit:
     def acquire(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
+    def note_extra_call(self) -> None:
+        return None
+
 
 class _Response:
     status_code = 200
