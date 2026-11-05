@@ -203,23 +203,23 @@ def test_two_resets_from_two_exits_trip_for_600s(monkeypatch):
     assert http_mod.ENDPOINT_BREAKER.open_families() != {}
 
 
-def test_three_family_resets_in_one_window_trip_even_with_a_spare_exit(monkeypatch):
-    """A retry that keeps resetting is still a ban: 3 resets/60s closes the family."""
+def test_resets_that_recovered_on_another_exit_never_trip_the_family(monkeypatch):
+    """Three reset-then-recover rounds are three bad exits, not an upstream ban.
+
+    A reset only implicates the node that carried it. Counting those recovered
+    resets toward a family trip would punish the upstream for a proxy fault, so
+    every round spends its one failover and answers 200 (QUOT-370 rework).
+    """
     pool, _nodes = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
     session = _AlternatingSession()
     _offline_pool(monkeypatch, session, pool)
     url = "https://push2.eastmoney.com/api/qt/stock/get"
 
-    http_mod.fetch("eastmoney", "GET", url, retries=2)
-    http_mod.fetch("eastmoney", "GET", url, retries=2)
+    for _ in range(3):
+        assert http_mod.fetch("eastmoney", "GET", url, retries=2).status_code == 200
 
-    with pytest.raises(TickHubError) as err:
-        http_mod.fetch("eastmoney", "GET", url, retries=2)
-
-    assert err.value.code == "QFSD-7001"
-    assert err.value.detail["retry_after_s"] == 600
-    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
-    assert len(session.exits) == 5  # third call trips before spending the failover
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
+    assert len(session.exits) == 6  # each round resets once, then fails over
 
 
 @pytest.mark.parametrize(

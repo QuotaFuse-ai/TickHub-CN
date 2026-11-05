@@ -136,10 +136,10 @@ ENDPOINT_BREAKER_SECONDS = 600.0
 # Longest a tool call may block on the endpoint gate before degrading instead.
 ENDPOINT_MAX_WAIT = 2.0
 # A reset is not proof of an upstream ban: one bad proxy exit looks the same.
-# Fail over once; trip the family when the retry also resets, or when resets
-# keep landing on the family inside one window (QUOT-407 decision, 2026-11-05).
-ENDPOINT_RESET_WINDOW = 60.0
-ENDPOINT_RESET_TRIP = 3
+# Fail over once; trip only when the retry on another exit also resets, or when
+# no healthy alternative exists. A reset that recovered on another exit is
+# evidence against that proxy node, never against the upstream family, so a
+# recovered reset never counts toward a trip.
 
 
 def endpoint_family(url: str) -> str | None:
@@ -172,14 +172,14 @@ class EndpointBreaker:
 
     A single reset is not evidence: QUOT-367 measured repeated "resets" that were
     one bad proxy exit, and a retry on another node answered. ``fetch`` therefore
-    fails over once and only trips when the retry resets too, or when resets keep
-    landing on the same family inside ``ENDPOINT_RESET_WINDOW``.
+    fails over once and only trips when the retry on another exit resets too, or
+    when no healthy alternative exists. A reset that recovered on another exit is
+    attributed to that node and never counted as evidence against the family.
     """
 
     def __init__(self, cooldown: float = ENDPOINT_BREAKER_SECONDS) -> None:
         self.cooldown = cooldown
         self._until: dict[str, float] = {}
-        self._resets: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     def remaining(self, family: str) -> float:
@@ -198,16 +198,6 @@ class EndpointBreaker:
             self._until[family] = time.monotonic() + self.cooldown
             return self.cooldown
 
-    def note_reset(self, family: str) -> int:
-        """Record one reset and return how many fall inside the current window."""
-        now = time.monotonic()
-        with self._lock:
-            stamps = self._resets.setdefault(family, deque())
-            while stamps and now - stamps[0] > ENDPOINT_RESET_WINDOW:
-                stamps.popleft()
-            stamps.append(now)
-            return len(stamps)
-
     def open_families(self) -> dict[str, int]:
         with self._lock:
             now = time.monotonic()
@@ -220,7 +210,6 @@ class EndpointBreaker:
     def reset(self) -> None:
         with self._lock:
             self._until.clear()
-            self._resets.clear()
 
 
 ENDPOINT_BREAKER = EndpointBreaker()
@@ -650,9 +639,11 @@ def fetch(
     non-trading day apart from a broken endpoint.
 
     push2 quote paths get an extra guard: a per-path rate gate plus a breaker
-    that opens after a reset is confirmed by a second exit (or by repeated
-    family resets). While open, calls raise ``QFSD-7001`` before any retry, so
-    the tool wrapper can serve stale cache.
+    that opens only after a reset is confirmed by a second exit, or when no
+    healthy alternative exists. A reset that recovered on another exit is
+    evidence against that proxy node, not the upstream family. While open,
+    calls raise ``QFSD-7001`` before any retry, so the tool wrapper can serve
+    stale cache.
     """
     settings = get_settings()
     timeout = timeout or settings.http_timeout
@@ -736,11 +727,13 @@ def fetch(
                 _mark_node(node, False)
                 tried.add(node.id)
             if reset:
-                recent = ENDPOINT_BREAKER.note_reset(family)
+                # Only an untried exit makes this reset inconclusive. If the
+                # failover answer is another reset, that second reset trips;
+                # if it succeeds, both the failover and the recovery stand and
+                # nothing about the family is proven.
                 can_failover = (
                     not reset_failover_used
                     and attempt < retries
-                    and recent < ENDPOINT_RESET_TRIP
                     and _has_another_node(tried)
                 )
                 if can_failover:
