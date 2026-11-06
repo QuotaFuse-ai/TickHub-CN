@@ -392,8 +392,25 @@ class HealthRegistry:
             else:
                 cur["failures"] += 1
                 cur["last_error"] = error
+            snapshot = dict(cur)
             self._dirty = True
             self._flush_locked()
+        self._mirror_to_cache(source, snapshot)
+
+    @staticmethod
+    def _mirror_to_cache(source: str, payload: dict[str, Any]) -> None:
+        """Publish the counter to the shared cache so the CLI can read it.
+
+        The peer talks to the CLI only through Redis (different processes), and
+        only when Redis is up. A cache outage must never break fetching, hence
+        the blanket guard.
+        """
+        try:
+            from ..cache.redis_cache import get_cache
+
+            get_cache().record_health(source, payload)
+        except Exception:  # noqa: BLE001
+            pass
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         with self._lock:
