@@ -973,6 +973,40 @@ th-cn cache stats
 上游数据站对出口 IP 有频次限制，网络环境不稳定时可以通过代理出口。代理是**可选**的，
 默认全部关闭；开启后所有出站请求（数据抓取、健康探测）都走代理。
 
+### 上游出口 provider（direct / pool / commercial）
+
+出口在三种 provider 之间切换，**只改配置、不改代码**：
+
+```bash
+# 空 = 按 PROXY_POOL_ENABLE 推导（关=direct、开=pool），旧部署无需改动
+PROXY_PROVIDER=          # direct | pool | commercial
+```
+
+| provider | 出口 | 说明 |
+| --- | --- | --- |
+| `direct` | 本机直连 | 不经过任何代理 |
+| `pool` | 自建代理池 | 节点来自 `PROXY_POOL_CONFIG_PATH` / `PROXY_POOL_LIST`，支持巡检、轮询、失败跳过 |
+| `commercial` | 商业 IP 代理池 | 固定网关，填 `PROXY_COMMERCIAL_URL` 即用 |
+
+商业出口：
+
+```bash
+PROXY_PROVIDER=commercial
+PROXY_COMMERCIAL_URL=http://gate.example.com:8000
+
+# 二选一：账号密码认证，或供应商按来源 IP 白名单放行
+PROXY_COMMERCIAL_USERNAME=
+PROXY_COMMERCIAL_PASSWORD=
+PROXY_COMMERCIAL_WHITELIST=          # 仅用于诊断展示（`th-cn doctor`），不参与请求
+```
+
+- 只支持 `http://` / `https://` 网关；`socks5://` 需要额外安装 `PySocks`（默认依赖不含）。
+- `PROXY_PROVIDER=commercial` 但 `PROXY_COMMERCIAL_URL` 为空时**不中断服务**：记一条 warn
+  日志并回退到代理池（池也未配置则直连）。上线后务必用 `th-cn doctor` 确认
+  `proxy_exit` 显示 `commercial url=set`。
+- 商业池若按每次请求轮换出口 IP，只适合抓取，**不适合测单 IP 安全速率**——速率结论按出口
+   IP 成立，须用固定（sticky）出口采集。
+
 ### 单代理
 
 ```bash
