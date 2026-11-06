@@ -138,6 +138,15 @@ def _stale_payload(key: str, exc: TickHubError, cache: Any) -> dict[str, Any] | 
     return payload
 
 
+def _is_failed(payload: Any) -> bool:
+    """A failed or partial answer, which must never be served to a retry."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is False:
+        return True
+    return bool((payload.get("meta") or {}).get("partial"))
+
+
 def tool(
     name: str | None = None,
     *,
@@ -145,8 +154,14 @@ def tool(
     ttl: str | int | None = "semi_static",
     cache_domain: str | None = None,
     writes: bool = False,
+    cache_failures: bool = False,
 ):
-    """Register a data function as an MCP tool with cache + projection."""
+    """Register a data function as an MCP tool with cache + projection.
+
+    ``cache_failures`` is off by default: caching a failure would hand the next
+    retry the same broken answer for the whole TTL, so retries never reach the
+    upstream and any breaker opened by them only measures cache hits.
+    """
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
         tool_name = name or fn.__name__
@@ -190,7 +205,13 @@ def tool(
                 cache = get_cache()
                 key = cache.key(domain, code, tool_name, call_kwargs)
                 try:
-                    payload, hit = cache.remember(key, ttl_seconds, producer, refresh=refresh)
+                    payload, hit = cache.remember(
+                        key,
+                        ttl_seconds,
+                        producer,
+                        refresh=refresh,
+                        cacheable=(lambda _value: True) if cache_failures else (lambda value: not _is_failed(value)),
+                    )
                 except TickHubError as exc:
                     payload = _stale_payload(key, exc, cache)
                     if payload is None:
@@ -201,8 +222,9 @@ def tool(
                         payload.setdefault("meta", {})["cache_hit"] = hit
                         # Only fast-expiring data is worth a durable copy: the
                         # replay exists for QFSD-7001 pacing, and long-TTL
-                        # tools never fail that way.
-                        if ttl_seconds <= TTL["health"]:
+                        # tools never fail that way. A failed or partial answer
+                        # must never become the last-good replay either.
+                        if not _is_failed(payload) and ttl_seconds <= TTL["health"]:
                             _remember_last_good(key, payload, cache)
             else:
                 payload = producer()

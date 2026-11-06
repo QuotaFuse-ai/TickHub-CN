@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import random
@@ -95,6 +96,19 @@ class RateLimiter:
             self._calls.append(time.monotonic())
             self._last = time.monotonic()
 
+    def note_extra_call(self) -> None:
+        """Count a failover attempt in the window without waiting for the min gap.
+
+        A retry on another node is real upstream pressure and belongs in the
+        60s budget, but it must not be delayed by the 25s spacing that protects
+        a single exit.
+        """
+        with self._lock:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] > self.window:
+                self._calls.popleft()
+            self._calls.append(now)
+
 
 _LIMITERS: dict[str, RateLimiter] = {}
 _LIMIT_LOCK = threading.Lock()
@@ -121,6 +135,14 @@ ENDPOINT_WINDOW = 60
 ENDPOINT_BREAKER_SECONDS = 600.0
 # Longest a tool call may block on the endpoint gate before degrading instead.
 ENDPOINT_MAX_WAIT = 2.0
+# A reset is not proof of an upstream ban: one bad proxy exit looks the same.
+# Fail over once; trip when the retry resets too, or when no healthy alternative
+# exists. A reset that recovered on another exit is evidence against that proxy
+# node, never against the upstream family; one that failed over and still did
+# not recover accumulates per family, and 3 inside 60s trip it (approved
+# QUOT-407 semantics §1.1, condition 2).
+ENDPOINT_RESET_WINDOW = 60.0
+ENDPOINT_RESET_TRIP = 3
 
 
 def endpoint_family(url: str) -> str | None:
@@ -149,15 +171,25 @@ def endpoint_limiter(family: str) -> RateLimiter:
 
 
 class EndpointBreaker:
-    """Cools an endpoint family down for a fixed window after a connection reset.
+    """Cools an endpoint family down for a fixed window after real evidence of a ban.
 
-    The upstream penalty latches for minutes, so retrying only burns attempts and
-    deepens the block. Tripping on the first reset is deliberate.
+    A single reset is not evidence: QUOT-367 measured repeated "resets" that were
+    one bad proxy exit, and a retry on another node answered. ``fetch`` therefore
+    fails over once and only trips when the retry on another exit resets too, or
+    when no healthy alternative exists. A reset that recovered on another exit is
+    attributed to that node and never counted as evidence against the family.
+
+    Resets whose failover did not recover are a different signal: they mean the
+    family kept resetting us even after the exit changed. Those accumulate per
+    family, and ``ENDPOINT_RESET_TRIP`` of them inside ``ENDPOINT_RESET_WINDOW``
+    trip the family (QUOT-407 semantics §1.1, condition 2). One call contributes
+    at most one count.
     """
 
     def __init__(self, cooldown: float = ENDPOINT_BREAKER_SECONDS) -> None:
         self.cooldown = cooldown
         self._until: dict[str, float] = {}
+        self._unrecovered: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     def remaining(self, family: str) -> float:
@@ -176,6 +208,27 @@ class EndpointBreaker:
             self._until[family] = time.monotonic() + self.cooldown
             return self.cooldown
 
+    def note_unrecovered_reset(self, family: str) -> int:
+        """Count one reset whose failover did not recover; return the window total."""
+        now = time.monotonic()
+        with self._lock:
+            stamps = self._unrecovered.setdefault(family, deque())
+            while stamps and now - stamps[0] > ENDPOINT_RESET_WINDOW:
+                stamps.popleft()
+            stamps.append(now)
+            return len(stamps)
+
+    def window_resets(self, family: str) -> int:
+        """Unrecovered resets still inside the window (read-only)."""
+        now = time.monotonic()
+        with self._lock:
+            stamps = self._unrecovered.get(family)
+            if not stamps:
+                return 0
+            while stamps and now - stamps[0] > ENDPOINT_RESET_WINDOW:
+                stamps.popleft()
+            return len(stamps)
+
     def open_families(self) -> dict[str, int]:
         with self._lock:
             now = time.monotonic()
@@ -188,6 +241,7 @@ class EndpointBreaker:
     def reset(self) -> None:
         with self._lock:
             self._until.clear()
+            self._unrecovered.clear()
 
 
 ENDPOINT_BREAKER = EndpointBreaker()
@@ -201,10 +255,70 @@ _RESET_MARKERS = (
     "broken pipe",
 )
 
+# Windows reports 10054 (reset by peer) and 10053 (aborted by the local stack);
+# POSIX uses ECONNRESET/ECONNABORTED. The message text is localized (zh-CN
+# Windows says "远端主机强迫关闭了一个现有的连接"), so errno decides. EPIPE is
+# deliberately excluded: a local broken pipe is not evidence of an upstream ban.
+_RESET_ERRNOS = frozenset({10053, 10054, errno.ECONNRESET, errno.ECONNABORTED})
+_RESET_TYPES = (ConnectionResetError, ConnectionAbortedError)
+
+
+def _walk_transport_errors(exc: BaseException) -> list[BaseException]:
+    """The exception plus every transport error it wraps (requests/urllib3 chains)."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    out: list[BaseException] = []
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        out.append(cur)
+        for attr in ("__cause__", "__context__", "reason"):
+            wrapped = getattr(cur, attr, None)
+            if isinstance(wrapped, BaseException):
+                stack.append(wrapped)
+        for arg in getattr(cur, "args", ()) or ():
+            if isinstance(arg, BaseException):
+                stack.append(arg)
+    return out
+
+
+def _errno_of(exc: BaseException) -> int | None:
+    """Socket errno/winerror, ignoring requests' non-integer ``errno`` slot."""
+    for attr in ("errno", "winerror"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _reset_by_type(exc: BaseException) -> bool:
+    for cur in _walk_transport_errors(exc):
+        if isinstance(cur, _RESET_TYPES) or cur.__class__.__name__ == "RemoteDisconnected":
+            return True
+        if _errno_of(cur) in _RESET_ERRNOS:
+            return True
+    return False
+
+
+def _root_transport_error(exc: BaseException) -> BaseException:
+    """The socket-level error inside a requests wrapper, for error reporting."""
+    for cur in _walk_transport_errors(exc):
+        if isinstance(cur, _RESET_TYPES) or cur.__class__.__name__ == "RemoteDisconnected":
+            return cur
+        if _errno_of(cur) is not None:
+            return cur
+    return exc
+
 
 def _is_connection_reset(exc: BaseException) -> bool:
-    if not isinstance(exc, (ConnectionResetError, requests.exceptions.ConnectionError)):
+    if not isinstance(
+        exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, requests.exceptions.ConnectionError)
+    ):
         return False
+    if _reset_by_type(exc):
+        return True
     text = f"{exc.__class__.__name__} {exc}".lower()
     return any(marker in text for marker in _RESET_MARKERS)
 
@@ -217,14 +331,23 @@ _RESET_CLASSES = frozenset(
 def is_connection_reset(exc: BaseException) -> bool:
     """Reset test that also understands the errors ``fetch`` boxes into ``TickHubError``.
 
-    ``fetch`` reports transport trouble through ``detail["error"]`` (the original
-    class name) and its message, so the reset markers still apply; an HTTP status
-    error never matches because neither its class nor its text mentions a reset.
+    ``fetch`` reports transport trouble through ``detail["error"]``/``detail["errno"]``
+    (socket error and not the requests wrapper), so the verdict survives both
+    localized messages and the boxing; an HTTP status error never matches.
     """
     if isinstance(exc, TickHubError):
-        name = str((exc.detail or {}).get("error") or exc.__class__.__name__)
-    else:
-        name = exc.__class__.__name__
+        detail = exc.detail or {}
+        name = str(detail.get("error") or exc.__class__.__name__)
+        if name in _RESET_CLASSES:
+            return True
+        err = detail.get("errno", detail.get("winerror"))
+        if isinstance(err, int) and err in _RESET_ERRNOS:
+            return True
+        text = f"{name} {exc}".lower()
+        return any(marker in text for marker in _RESET_MARKERS)
+    if _reset_by_type(exc):
+        return True
+    name = exc.__class__.__name__
     if name in _RESET_CLASSES:
         return True
     text = f"{name} {exc}".lower()
@@ -232,10 +355,11 @@ def is_connection_reset(exc: BaseException) -> bool:
 
 
 def reset_endpoint_guard() -> None:
-    """Clear limiters and breaker windows (tests / admin maintenance)."""
+    """Clear limiters, breaker windows and counters (tests / admin maintenance)."""
     ENDPOINT_BREAKER.reset()
     with _ENDPOINT_LIMIT_LOCK:
         _ENDPOINT_LIMITERS.clear()
+    ENDPOINT_COUNTERS.clear()
 
 
 class HealthRegistry:
@@ -293,7 +417,11 @@ class HealthRegistry:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(path.name + ".tmp")
-            payload = {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "sources": self._state}
+            payload = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "sources": {k: dict(v) for k, v in self._state.items()},
+                "endpoints": ENDPOINT_COUNTERS.snapshot(),
+            }
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, path)
             self._dirty = False
@@ -305,15 +433,117 @@ class HealthRegistry:
 HEALTH = HealthRegistry()
 
 
-def read_health_state(path: str | Path | None = None, *, max_age_s: float = 86400) -> dict[str, dict[str, Any]]:
-    """Health counters written by another process, ignored once stale."""
+class EndpointCounters:
+    """Read-only attempt accounting per endpoint family.
+
+    One entry is a real round trip to the upstream path, retries included, so a
+    150-code refresh that the endpoint answered once reads 1 here even when the
+    cache was bypassed and a retry failover happened. ``reset_nodes`` keeps the
+    proxy exit each reset came through (``null`` = direct/static proxy) so a
+    single bad node can be told apart from an upstream ban. ``nodes`` repeats
+    the same tallies per exit, which is what shows a disabled node stopped
+    carrying traffic instead of merely being skipped once.
+    """
+
+    last_resets_limit = 10
+    max_nodes = 32
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._families: dict[str, dict[str, Any]] = {}
+
+    def attempt(self, family: str, node_id: str | None = None) -> None:
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["attempts"] += 1
+            self._node(cur, node_id)["attempts"] += 1
+
+    def success(self, family: str, node_id: str | None = None) -> None:
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["successes"] += 1
+            self._node(cur, node_id)["successes"] += 1
+
+    def failure(self, family: str, node_id: str | None = None) -> None:
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["failures"] += 1
+            self._node(cur, node_id)["failures"] += 1
+
+    def reset(self, family: str, node_id: str | None) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with self._lock:
+            cur = self._families.setdefault(family, self._blank(family))
+            cur["resets"] += 1
+            cur["last_reset_at"] = stamp
+            cur["last_reset_node"] = node_id
+            cur["reset_nodes"].append({"node": node_id, "at": stamp})
+            del cur["reset_nodes"][: -self.last_resets_limit]
+            node = self._node(cur, node_id)
+            node["resets"] += 1
+            node["last_reset_at"] = stamp
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {k: self._copy(v) for k, v in self._families.items()}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._families.clear()
+
+    @staticmethod
+    def _blank(family: str) -> dict[str, Any]:
+        return {
+            "family": family,
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "resets": 0,
+            "last_reset_at": None,
+            "last_reset_node": None,
+            "reset_nodes": [],
+            "nodes": {},
+        }
+
+    def _node(self, cur: dict[str, Any], node_id: str | None) -> dict[str, Any]:
+        key = node_id or "direct"
+        row = cur["nodes"].get(key)
+        if row is None:
+            if len(cur["nodes"]) >= self.max_nodes:
+                cur["nodes"].pop(next(iter(cur["nodes"])))
+            row = cur["nodes"][key] = {
+                "node": key,
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "resets": 0,
+                "last_reset_at": None,
+            }
+        return row
+
+    @staticmethod
+    def _copy(row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        out["reset_nodes"] = [dict(r) for r in row["reset_nodes"]]
+        out["nodes"] = {k: dict(v) for k, v in row["nodes"].items()}
+        return out
+
+
+ENDPOINT_COUNTERS = EndpointCounters()
+
+
+def _node_id(node: Any) -> str | None:
+    return node.id if node is not None else None
+
+
+def _read_health_file(path: str | Path | None, *, max_age_s: float = 86400) -> dict[str, Any]:
+    """The raw health document written by another process, empty once stale."""
     p = Path(path) if path else Path(get_settings().health_state_path)
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    sources = raw.get("sources")
-    if not isinstance(sources, dict):
+    if not isinstance(raw, dict):
         return {}
     updated = str(raw.get("updated_at") or "")
     if updated and max_age_s > 0:
@@ -323,7 +553,25 @@ def read_health_state(path: str | Path | None = None, *, max_age_s: float = 8640
                 return {}
         except ValueError:
             pass
+    return raw
+
+
+def read_health_state(path: str | Path | None = None, *, max_age_s: float = 86400) -> dict[str, dict[str, Any]]:
+    """Health counters written by another process, ignored once stale."""
+    sources = _read_health_file(path, max_age_s=max_age_s).get("sources")
+    if not isinstance(sources, dict):
+        return {}
     return {str(k): v for k, v in sources.items() if isinstance(v, dict)}
+
+
+def read_endpoint_counters(
+    path: str | Path | None = None, *, max_age_s: float = 86400
+) -> dict[str, dict[str, Any]]:
+    """Endpoint-family counters written by another process, ignored once stale."""
+    families = _read_health_file(path, max_age_s=max_age_s).get("endpoints")
+    if not isinstance(families, dict):
+        return {}
+    return {str(k): v for k, v in families.items() if isinstance(v, dict)}
 
 
 def _proxy_for(
@@ -354,6 +602,16 @@ PROXY_FAULTS = (
     requests.exceptions.ConnectTimeout,
     requests.exceptions.SSLError,
 )
+
+
+def _has_another_node(tried: set[str] | frozenset[str]) -> bool:
+    """True when the pool still holds a healthy exit this request has not used."""
+    try:
+        from ..proxy.pool import get_pool
+
+        return get_pool().has_alternative(tried)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _mark_node(node: Any, ok: bool, latency_ms: float | None = None) -> None:
@@ -412,8 +670,12 @@ def fetch(
     non-trading day apart from a broken endpoint.
 
     push2 quote paths get an extra guard: a per-path rate gate plus a breaker
-    that opens on the first connection reset. While open, calls raise
-    ``QFSD-7001`` before any retry, so the tool wrapper can serve stale cache.
+    that opens when the failover retry resets too, when no healthy alternative
+    exists, or when resets that failed over and still did not recover reach
+    ``ENDPOINT_RESET_TRIP`` inside ``ENDPOINT_RESET_WINDOW``. A reset that
+    recovered on another exit is evidence against that proxy node, not the
+    upstream family. While open, calls raise ``QFSD-7001`` before any retry, so
+    the tool wrapper can serve stale cache.
     """
     settings = get_settings()
     timeout = timeout or settings.http_timeout
@@ -450,10 +712,15 @@ def fetch(
     limiter_for(source).acquire()
     last_err: Exception | None = None
     tried: set[str] = set()
+    reset_failover_used = False
+    reset_pending = False  # the previous attempt reset and this one is its failover
+    reset_counted = False  # this call already contributed one window count
 
     for attempt in range(retries + 1):
         started = time.monotonic()
         proxies, node = _proxy_for(source, tried)
+        if family:
+            ENDPOINT_COUNTERS.attempt(family, _node_id(node))
         try:
             resp = _session_for(source).request(
                 method.upper(),
@@ -471,43 +738,108 @@ def fetch(
                 _mark_node(node, True, latency)
             if resp.status_code in allow_status:
                 HEALTH.record(source, True, latency)
+                if family:
+                    ENDPOINT_COUNTERS.success(family, _node_id(node))
                 return resp
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
             resp.raise_for_status()
             HEALTH.record(source, True, latency)
+            if family:
+                ENDPOINT_COUNTERS.success(family, _node_id(node))
             return resp
         except Exception as exc:  # noqa: BLE001
             latency = (time.monotonic() - started) * 1000
             last_err = exc
             HEALTH.record(source, False, latency, str(exc))
-            if node is not None and isinstance(exc, PROXY_FAULTS):
+            reset = bool(family) and _is_connection_reset(exc)
+            if family:
+                ENDPOINT_COUNTERS.failure(family, _node_id(node))
+                if reset:
+                    ENDPOINT_COUNTERS.reset(family, _node_id(node))
+            if node is not None and (reset or isinstance(exc, PROXY_FAULTS)):
                 _mark_node(node, False)
                 tried.add(node.id)
-            if family and _is_connection_reset(exc):
+            if family and reset_pending:
+                # The previous attempt reset and failed over to this exit, and
+                # this except block means it did not answer 200: that reset did
+                # not recover. Count one window event for this call, never two.
+                if not reset_counted:
+                    ENDPOINT_BREAKER.note_unrecovered_reset(family)
+                    reset_counted = True
+                reset_pending = False
+            if reset:
+                # Only an untried exit makes this reset inconclusive. If the
+                # failover answer is another reset, that second reset trips;
+                # if it succeeds, both the failover and the recovery stand and
+                # nothing about the family is proven.
+                can_failover = (
+                    not reset_failover_used
+                    and attempt < retries
+                    and _has_another_node(tried)
+                )
+                if can_failover:
+                    reset_failover_used = True
+                    reset_pending = True
+                    endpoint_limiter(family).note_extra_call()
+                    continue
+                # No failover left, so this call's reset is unrecovered. Count
+                # it once; a second reset in the same call must not add another.
+                if family and not reset_counted:
+                    ENDPOINT_BREAKER.note_unrecovered_reset(family)
+                    reset_counted = True
                 ENDPOINT_BREAKER.trip(family)
+                root = _root_transport_error(exc)
                 raise TickHubError(
                     "QFSD-7001",
                     f"{family} 连接被重置，已熔断 {int(ENDPOINT_BREAKER_SECONDS)} 秒",
                     detail={
                         "url": url,
                         "endpoint": family,
+                        "reason": "endpoint_breaker",
                         "retry_after_s": int(ENDPOINT_BREAKER_SECONDS),
+                        "error": root.__class__.__name__,
+                        "errno": _errno_of(root),
                     },
                     retryable=True,
                 ) from exc
+            if family and reset_counted:
+                # Backstop behind the failover rule: a call that reset and did
+                # not recover on its failover is one event, and 3 such calls in
+                # 60s mean the family keeps resetting us regardless of the exit.
+                recent = ENDPOINT_BREAKER.window_resets(family)
+                if recent >= ENDPOINT_RESET_TRIP:
+                    ENDPOINT_BREAKER.trip(family)
+                    root = _root_transport_error(exc)
+                    raise TickHubError(
+                        "QFSD-7001",
+                        f"{family} 60 秒内连接重置 {recent} 次未恢复，"
+                        f"已熔断 {int(ENDPOINT_BREAKER_SECONDS)} 秒",
+                        detail={
+                            "url": url,
+                            "endpoint": family,
+                            "reason": "endpoint_breaker",
+                            "retry_after_s": int(ENDPOINT_BREAKER_SECONDS),
+                            "resets_in_window": recent,
+                            "error": root.__class__.__name__,
+                            "errno": _errno_of(root),
+                        },
+                        retryable=True,
+                    ) from exc
             if attempt < retries:
                 time.sleep(min(2 ** attempt, 4) + random.uniform(0, 0.3))
                 continue
     timeout_err = isinstance(last_err, requests.Timeout)
     status = getattr(getattr(last_err, "response", None), "status_code", None)
+    root = _root_transport_error(last_err) if last_err is not None else None
     raise TickHubError(
         "QFSD-1001" if timeout_err else "QFSD-9003",
         f"{source} request failed: {last_err}",
         detail={
             "url": url,
             "status": status,
-            "error": last_err.__class__.__name__ if last_err else None,
+            "error": root.__class__.__name__ if root is not None else None,
+            "errno": _errno_of(root) if root is not None else None,
         },
         retryable=True,
     )

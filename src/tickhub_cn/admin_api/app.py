@@ -23,7 +23,7 @@ from typing import Any
 from .. import __version__
 from ..cache.redis_cache import get_cache
 from ..core.config import SECRET_HINTS, Settings, get_settings
-from ..core.http import HEALTH, read_health_state
+from ..core.http import ENDPOINT_COUNTERS, HEALTH, read_endpoint_counters, read_health_state
 from ..logging.setup import audit, get_logger
 from ..proxy.exit import resolve_provider, safe_url
 from ..proxy.pool import (
@@ -328,6 +328,7 @@ def create_app(settings: Settings | None = None, *, admin: dict[str, Any] | None
             "cache": cache_stats,
             "crawler": crawler,
             "health": _health_snapshot(),
+            "endpoints": _endpoint_snapshot(),
         }
 
     @app.get("/api/sources")
@@ -730,6 +731,13 @@ def _health_snapshot() -> dict[str, Any]:
             current = merged.get(source)
             if current is None or _checked_at(payload) >= _checked_at(current):
                 merged[source] = payload
+    return merged
+
+
+def _endpoint_snapshot() -> dict[str, Any]:
+    """Per-family attempt counters; a family seen by either process wins."""
+    merged = read_endpoint_counters()
+    merged.update(ENDPOINT_COUNTERS.snapshot())
     return merged
 
 
