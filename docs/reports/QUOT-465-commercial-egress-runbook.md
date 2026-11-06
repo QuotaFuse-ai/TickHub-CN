@@ -1,8 +1,10 @@
 # QUOT-465 商业出口复测 ulist 安全速率：就绪状态与执行手册
 
 - 日期：2026-11-06
-- 状态：**触发条件未满足，未开跑**。代码侧已就绪，缺商业出口本身。
-- 上游口径：`docs/decisions/QUOT-407-refresh-frequency.md`（§2 样本量、§3 出口封锁处置）
+- 状态：**已于 2026-11-06 晚间完成一次复测**（51代理付费出口，15s 档 40 次 / 711s / 0 失败），
+  结论见 `docs/decisions/QUOT-407-refresh-frequency.md` §5。本手册 §1–§4 的预检与前置要求仍然有效，
+  用于下一次固定单 IP 出口的复测；§1 记录的是当日上午的未开跑状态。
+- 上游口径：`docs/decisions/QUOT-407-refresh-frequency.md`（§2 样本量、§3 出口封锁处置、§5 复测结论）
 - 上一轮实测：`docs/reports/QUOT-407-ulist-rate-probe.md`（15s 档 0/40，出口 RST）
 
 ## 1. 触发条件核查（2026-11-06 12:29 CST）
