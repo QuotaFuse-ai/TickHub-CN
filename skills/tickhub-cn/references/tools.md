@@ -1,6 +1,6 @@
 # Tool catalogue
 
-125 canonical tools + 25 aliases = 150 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
+126 canonical tools + 25 aliases = 151 MCP names. Generated with `scripts/gen_tool_catalog.py`; do not edit by hand.
 
 TTL is the cache lifetime in seconds; `—` means the alias shares its target's behaviour and the response is not cached separately.
 
@@ -11,6 +11,7 @@ TTL is the cache lifetime in seconds; `—` means the alias shares its target's 
 | `apply_adjust` | `code`, `closes`, `factors` | — | Apply forward-adjustment factors to raw closes (rule-based, no inference). |
 | `baidu_kline_with_ma` | `code`, `period`, `limit` | 86400 | K-line with moving averages from Baidu (secondary source). |
 | `bse_quote_backup` | `trade_date`, `code`, `max_pages` | 86400 | Beijing Stock Exchange closing snapshot with 5-level book (official source). |
+| `em_kline` | `code`, `period`, `adjust`, `limit`, `start`, `end`, `days` | 86400 | Daily/weekly/monthly K-line from Eastmoney push2his (qfq by default). |
 | `etf_quote` | `codes` | 60 | Realtime ETF quote (price, volume, turnover, premium inputs). |
 | `index_quote` | `codes` | 60 | Realtime index quote (SH/SZ/BSE indices). |
 | `sina_adjust_factor` | `code` | 604800 | Forward-adjustment factor history from Sina. |

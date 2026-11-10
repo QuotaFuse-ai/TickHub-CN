@@ -83,7 +83,7 @@ def test_catalogue_section_counts() -> None:
     parsed = parse_catalogue()
     layers = {name: rows for name, rows in parsed["layers"].items() if name != "aliases"}
     assert set(layers) == set(_SECTION_LAYERS) | (EXPECTED_LAYERS - _SECTION_LAYERS["option"])
-    assert sum(len(rows) for rows in layers.values()) == 125
+    assert sum(len(rows) for rows in layers.values()) == 126
     assert len(parsed["alias"]) == 25
 
 
@@ -143,9 +143,9 @@ def test_tool_catalog_matches_registry() -> None:
 
 
 def test_mcp_tool_count_includes_aliases() -> None:
-    assert len(REGISTRY) == 125
+    assert len(REGISTRY) == 126
     assert len(ALIASES) == 25
-    assert tool_count() == 150
+    assert tool_count() == 151
 
 
 def test_tool_names_quoted_in_docs_are_callable() -> None:
