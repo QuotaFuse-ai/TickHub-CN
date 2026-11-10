@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import TickHubError
-from ..core.http import fetch, request
+from ..core.http import em_get, fetch, request
 from ..core.ticker import (
     compact_date,
     ensure_code_list,
     is_index,
+    market_of,
     normalize_code,
     tencent_symbol,
 )
@@ -209,6 +210,76 @@ def tencent_kline(
     if end:
         rows = [r for r in rows if r["date"] <= end]
     return ok({"code": normalize_code(code), "period": period, "adjust": adj, "klines": rows}, "tencent", extra={"count": len(rows)})
+
+
+_EM_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+_EM_KLINES = {"day": 101, "daily": 101, "1d": 101, "week": 102, "weekly": 102, "month": 103, "monthly": 103}
+_EM_FQT = {"qfq": 1, "hfq": 2, "none": 0, "": 0}
+
+
+@tool("em_kline", layer="quotes", ttl="semi_static", cache_domain="kline")
+def em_kline(
+    code: str,
+    period: str = "daily",
+    adjust: str = "qfq",
+    limit: int = 0,
+    start: str = "",
+    end: str = "",
+    days: int = 0,
+) -> dict[str, Any]:
+    """Daily/weekly/monthly K-line from Eastmoney push2his (qfq by default).
+
+    Tencent caps daily history at ~641 bars; push2his honours ``lmt`` up to 2000,
+    which is what the 5-year backfill needs. Requests go through ``em_get`` so
+    they use the configured exit (pool / commercial / direct) and shared throttle.
+    ``volume`` is in 手 and ``amount`` in 元, same units as ``tencent_kline``.
+    ``days`` mirrors the index-kline parameter name so one adapter can drive both
+    tools; it only applies when the caller did not pass ``limit``.
+    """
+    c = code_or_raise(code)
+    klt = _EM_KLINES.get((period or "daily").lower())
+    if klt is None:
+        raise TickHubError("QFSD-9001", f"unsupported period: {period}")
+    adj = (adjust or "qfq").lower()
+    fqt = _EM_FQT.get(adj)
+    if fqt is None:
+        raise TickHubError("QFSD-9001", f"unsupported adjust: {adjust}")
+    limit = max(1, min(int(limit or days or 2000), 2000))
+    payload = em_get(
+        _EM_KLINE,
+        params={
+            "secid": f"{1 if market_of(code) == 'sh' else 0}.{c}",
+            "klt": klt,
+            "fqt": fqt,
+            "beg": compact_date(start) if start else "19900101",
+            "end": compact_date(end) if end else "20500101",
+            "lmt": limit,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        },
+    )
+    data = (payload or {}).get("data") or {}
+    rows = []
+    for line in data.get("klines") or []:
+        parts = str(line).split(",")
+        if len(parts) < 7:
+            continue
+        rows.append(
+            {
+                "date": parts[0],
+                "open": to_float(parts[1]),
+                "close": to_float(parts[2]),
+                "high": to_float(parts[3]),
+                "low": to_float(parts[4]),
+                "volume": to_float(parts[5]),
+                "amount": to_float(parts[6]),
+            }
+        )
+    return ok(
+        {"code": c, "period": period, "adjust": adj, "klines": rows},
+        "eastmoney",
+        extra={"count": len(rows)},
+    )
 
 
 @tool("tencent_minute", layer="quotes", ttl="realtime", cache_domain="kline")
@@ -726,6 +797,7 @@ def quote_batch(codes: list[str], *, max_codes: int = 50, concurrency: int = 4) 
 __all__ = [
     "apply_adjust",
     "baidu_kline_with_ma",
+    "em_kline",
     "etf_quote",
     "index_quote",
     "quote_batch",
