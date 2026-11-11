@@ -61,17 +61,17 @@ def test_admin_requires_token_on_every_route() -> None:
     assert status["ok"] is True
     assert status["auth"] == "token"
     assert status["readonly"] is False
-    assert status["tools"] == 125
-    assert sum(status["layers"].values()) == 125
+    assert status["tools"] == 126
+    assert sum(status["layers"].values()) == 126
 
     bearer = client.get("/api/status", headers={"authorization": f"Bearer {TOKEN}"})
     assert bearer.status_code == 200
 
     tools = client.get("/api/mcp/tools", headers=_headers()).json()
-    assert tools["count"] == 125
-    assert len(tools["tools"]) == 125
+    assert tools["count"] == 126
+    assert len(tools["tools"]) == 126
     quotes = client.get("/api/mcp/tools?layer=quotes", headers=_headers()).json()
-    assert len(quotes["tools"]) == 13
+    assert len(quotes["tools"]) == 14
 
     # Loopback clients need no token when none is configured.
     open_client = _client(auth_token="")

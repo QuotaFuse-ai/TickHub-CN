@@ -587,16 +587,34 @@ def source_health(ctx: typer.Context, output: Optional[str] = _out_opt()) -> Non
 
 
 def _health_payload() -> dict[str, Any]:
-    from ..cache.redis_cache import get_cache
-    from ..core.http import HEALTH, SOURCE_LIMITS
+    from ..core.http import HEALTH, SOURCE_LIMITS, read_health_state
 
-    live = HEALTH.snapshot()
+    # A one-shot CLI process only ever sees the calls it makes itself, so its
+    # own ``HEALTH`` registry is empty here. The real counters belong to the
+    # long-running peer (MCP/admin), which mirrors them to ``HEALTH_STATE_PATH``
+    # (and, when Redis is up, to the shared cache). Merge all three the way the
+    # admin console does, so this command reflects the peer rather than a
+    # process that observed nothing.
     try:
-        stored = get_cache().read_health()
-    except Exception:
-        stored = {}
+        from ..cache.redis_cache import get_cache
+
+        cached = get_cache().read_health()
+    except Exception:  # noqa: BLE001 - health must not fail on a cache outage
+        cached = {}
+    observed = read_health_state()
+    live = HEALTH.snapshot()
+
+    merged: dict[str, dict[str, Any]] = {}
+    for batch in (observed, cached, live):
+        for name, payload in batch.items():
+            if not isinstance(payload, dict):
+                continue
+            current = merged.get(name)
+            if current is None or _health_checked_at(payload) >= _health_checked_at(current):
+                merged[name] = payload
+
     rows: list[dict[str, Any]] = []
-    for name in sorted(set(SOURCE_LIMITS) | set(live) | set(stored)):
+    for name in sorted(set(SOURCE_LIMITS) | set(merged)):
         row: dict[str, Any] = {
             "source": name,
             "ok": True,
@@ -606,14 +624,22 @@ def _health_payload() -> dict[str, Any]:
             "last_checked_at": None,
             "last_error": None,
         }
-        row.update(stored.get(name) or {})
-        row.update(live.get(name) or {})
+        row.update(merged.get(name) or {})
         rows.append(row)
+    counted = sum(1 for r in rows if r.get("successes") or r.get("failures"))
     return envelope(
         {"sources": rows, "count": len(rows)},
         source="computed",
-        extra={"observed": len(live)},
+        extra={"observed": counted},
     )
+
+
+def _health_checked_at(payload: dict[str, Any]) -> float:
+    raw = str(payload.get("last_checked_at") or "")
+    try:
+        return _dt.datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return 0.0
 
 
 # ---------------------------------------------------------------------- cache
@@ -894,12 +920,28 @@ def _config_check_payload() -> dict[str, Any]:
     fm = FieldMap.load(settings.field_map_path)
     add("field_map", "error" if fm.error else "ok", fm.error or f"{len(fm.tools)} tools mapped")
 
+    from ..proxy.exit import resolve_provider
+
+    provider = resolve_provider(settings)
+    if provider == "direct":
+        add("proxy_exit", "ok", "direct (no proxy)")
+    elif provider == "commercial":
+        commercial_url = str(settings.proxy_commercial_url or "").strip()
+        whitelist = [x for x in str(settings.proxy_commercial_whitelist or "").split(",") if x.strip()]
+        detail = "url=set" if commercial_url else "url=EMPTY (falls back to pool)"
+        detail += f" auth={'basic' if settings.proxy_commercial_username else 'none'}"
+        detail += f" whitelist={len(whitelist)}"
+        add("proxy_exit", "ok" if commercial_url else "warn", f"commercial {detail}")
+    else:
+        target = str(settings.proxy_pool_url or "").strip() or settings.proxy_pool_config_path
+        add("proxy_exit", "ok", f"pool -> {target}")
+
     if not settings.proxy_pool_enable:
         add("proxy_pool", "ok", "disabled (PROXY_POOL_ENABLE=false)")
-    elif not Path(settings.proxy_pool_config_path).exists():
+    elif not Path(settings.proxy_pool_config_path).exists() and not str(settings.proxy_pool_url or "").strip():
         add("proxy_pool", "warn", f"missing file: {settings.proxy_pool_config_path}")
     else:
-        add("proxy_pool", "ok", settings.proxy_pool_config_path)
+        add("proxy_pool", "ok", str(settings.proxy_pool_url or settings.proxy_pool_config_path))
 
     if settings.admin_host not in ("127.0.0.1", "::1", "localhost") and not settings.admin_auth_token:
         add("admin", "error", "non-loopback admin host requires ADMIN_AUTH_TOKEN")

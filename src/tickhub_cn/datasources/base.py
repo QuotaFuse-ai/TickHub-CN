@@ -15,6 +15,7 @@ import copy
 import functools
 import inspect
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -50,6 +51,8 @@ def _signature_with_controls(sig: inspect.Signature) -> inspect.Signature:
         inspect.Parameter("data_as_of", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
         inspect.Parameter("fields", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
         inspect.Parameter("tier", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str),
+        inspect.Parameter("refresh", inspect.Parameter.KEYWORD_ONLY, default=False, annotation=bool),
+        inspect.Parameter("no_cache", inspect.Parameter.KEYWORD_ONLY, default=False, annotation=bool),
     ]
     return sig.replace(parameters=params)
 
@@ -83,36 +86,65 @@ def _apply_as_of(payload: Any, data_as_of: str | None) -> Any:
 # Last successful payload for each cache key. Realtime entries expire after a
 # minute, but a rate-limited upstream must not turn a working tool into an error,
 # so the wrapper keeps a process-local copy to serve while the breaker is open.
-_LAST_GOOD: dict[str, Any] = {}
+# The copy is also written to the cache backend with a long TTL: after a restart
+# (or on a peer that never served this key in its lifetime) the in-process dict
+# is empty, and only the backend copy can answer instead of raising.
+_LAST_GOOD: dict[str, tuple[float, Any]] = {}
 _LAST_GOOD_LOCK = threading.Lock()
 _LAST_GOOD_LIMIT = 2048
 
 
-def _remember_last_good(key: str, payload: dict[str, Any]) -> None:
+def _remember_last_good(key: str, payload: dict[str, Any], cache: Any) -> None:
+    stored_at = time.time()
     with _LAST_GOOD_LOCK:
         if len(_LAST_GOOD) >= _LAST_GOOD_LIMIT:
             _LAST_GOOD.clear()
-        _LAST_GOOD[key] = copy.deepcopy(payload)
+        _LAST_GOOD[key] = (stored_at, copy.deepcopy(payload))
+    cache.remember_last_good(key, payload)
 
 
-def _stale_payload(key: str, exc: TickHubError) -> dict[str, Any] | None:
+def _stale_payload(key: str, exc: TickHubError, cache: Any) -> dict[str, Any] | None:
     if exc.code != "QFSD-7001":
         return None
+    source = "process"
+    stored_at = 0.0
     with _LAST_GOOD_LOCK:
-        cached = _LAST_GOOD.get(key)
-        if cached is None:
+        entry = _LAST_GOOD.get(key)
+        payload = copy.deepcopy(entry[1]) if entry is not None else None
+        if entry is not None:
+            stored_at = entry[0]
+    if payload is None:
+        record = cache.last_good(key)
+        if record is None or not isinstance(record[0], dict):
             return None
-        payload = copy.deepcopy(cached)
-    payload.setdefault("meta", {}).update(
+        payload, stored_at = copy.deepcopy(record[0]), record[1]
+        source = cache.backend
+    meta = payload.setdefault("meta", {})
+    meta.update(
         {
             "cache_hit": True,
             "stale": True,
             "degraded": "stale_cache",
             "error_code": exc.code,
+            "last_good_source": source,
             "note": "上游限流/熔断，返回最近一次成功结果",
         }
     )
+    if stored_at:
+        meta["stale_age_s"] = max(0, int(time.time() - stored_at))
+    retry_after = (exc.detail or {}).get("retry_after_s")
+    if retry_after is not None:
+        meta["retry_after_s"] = retry_after
     return payload
+
+
+def _is_failed(payload: Any) -> bool:
+    """A failed or partial answer, which must never be served to a retry."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("ok") is False:
+        return True
+    return bool((payload.get("meta") or {}).get("partial"))
 
 
 def tool(
@@ -122,8 +154,14 @@ def tool(
     ttl: str | int | None = "semi_static",
     cache_domain: str | None = None,
     writes: bool = False,
+    cache_failures: bool = False,
 ):
-    """Register a data function as an MCP tool with cache + projection."""
+    """Register a data function as an MCP tool with cache + projection.
+
+    ``cache_failures`` is off by default: caching a failure would hand the next
+    retry the same broken answer for the whole TTL, so retries never reach the
+    upstream and any breaker opened by them only measures cache hits.
+    """
 
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
         tool_name = name or fn.__name__
@@ -139,8 +177,10 @@ def tool(
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            refresh = bool(kwargs.pop("_refresh", False))
-            no_cache = bool(kwargs.pop("_no_cache", False))
+            # ``_refresh``/``_no_cache`` are the CLI spellings; MCP clients pass
+            # the public ``refresh``/``no_cache`` schema fields.
+            refresh = bool(kwargs.pop("_refresh", False)) or bool(kwargs.pop("refresh", False))
+            no_cache = bool(kwargs.pop("_no_cache", False)) or bool(kwargs.pop("no_cache", False))
             fields = kwargs.pop("fields", "") or None
             data_as_of = kwargs.pop("data_as_of", "") or None
             try:
@@ -165,16 +205,27 @@ def tool(
                 cache = get_cache()
                 key = cache.key(domain, code, tool_name, call_kwargs)
                 try:
-                    payload, hit = cache.remember(key, ttl_seconds, producer, refresh=refresh)
+                    payload, hit = cache.remember(
+                        key,
+                        ttl_seconds,
+                        producer,
+                        refresh=refresh,
+                        cacheable=(lambda _value: True) if cache_failures else (lambda value: not _is_failed(value)),
+                    )
                 except TickHubError as exc:
-                    payload = _stale_payload(key, exc)
+                    payload = _stale_payload(key, exc, cache)
                     if payload is None:
                         raise
                 else:
                     if isinstance(payload, dict):
                         payload = copy.deepcopy(payload)
                         payload.setdefault("meta", {})["cache_hit"] = hit
-                        _remember_last_good(key, payload)
+                        # Only fast-expiring data is worth a durable copy: the
+                        # replay exists for QFSD-7001 pacing, and long-TTL
+                        # tools never fail that way. A failed or partial answer
+                        # must never become the last-good replay either.
+                        if not _is_failed(payload) and ttl_seconds <= TTL["health"]:
+                            _remember_last_good(key, payload, cache)
             else:
                 payload = producer()
 

@@ -10,11 +10,23 @@ import requests
 from tickhub_cn.core import http as http_mod
 from tickhub_cn.core.errors import TickHubError
 from tickhub_cn.datasources import base as base_mod
+from tickhub_cn.proxy.pool import ProxyNode, ProxyPool
 
 
 class _NoLimit:
-    def acquire(self) -> None:
+    def acquire(self, *_args, **_kwargs) -> None:
         pass
+
+    def note_extra_call(self) -> None:
+        pass
+
+
+class _OkResponse:
+    status_code = 200
+    text = "{}"
+
+    def raise_for_status(self) -> None:
+        return None
 
 
 class _ResetSession:
@@ -26,6 +38,78 @@ class _ResetSession:
         raise requests.ConnectionError("Connection reset by peer")
 
 
+class _NodeAwareSession:
+    """Resets for exits in ``bad``; answers 200 for every other exit."""
+
+    def __init__(self, bad: set[str]) -> None:
+        self.bad = bad
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        exit_url = str((proxies or {}).get("https", ""))
+        self.exits.append(exit_url)
+        if exit_url in self.bad:
+            # zh-CN Windows wording; the classifier must not depend on the text.
+            raise requests.ConnectionError(
+                "Connection aborted.", ConnectionResetError(10054, "远端主机强迫关闭了一个现有的连接。")
+            )
+        return _OkResponse()
+
+
+class _AlternatingSession:
+    """Resets on every odd attempt, answers on every even one."""
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        self.n += 1
+        self.exits.append(str((proxies or {}).get("https", "")))
+        if self.n % 2 == 1:
+            raise requests.ConnectionError("Connection reset by peer")
+        return _OkResponse()
+
+
+class _StatusResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.text = "{}"
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ResetThenServerErrorSession:
+    """Resets the first attempt of every call, then answers HTTP 500."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        self.calls += 1
+        self.exits.append(str((proxies or {}).get("https", "")))
+        if self.calls % 2 == 1:
+            raise requests.ConnectionError("Connection reset by peer")
+        return _StatusResponse(500)
+
+
+class _TwoResetsOneCallSession:
+    """One call: reset, HTTP 500, reset — two resets without a recovery."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.exits: list[str] = []
+
+    def request(self, method, url, proxies=None, **kwargs):
+        self.calls += 1
+        self.exits.append(str((proxies or {}).get("https", "")))
+        if self.calls in (1, 3):
+            raise requests.ConnectionError("Connection reset by peer")
+        return _StatusResponse(500)
+
+
 @pytest.fixture(autouse=True)
 def clean_guard():
     http_mod.reset_endpoint_guard()
@@ -35,10 +119,28 @@ def clean_guard():
     http_mod.reset_endpoint_guard()
 
 
-def _offline(monkeypatch, session):
+def _offline(monkeypatch, session, proxy_for=None):
     monkeypatch.setattr(http_mod, "_session_for", lambda source: session)
     monkeypatch.setattr(http_mod, "limiter_for", lambda source: _NoLimit())
-    monkeypatch.setattr(http_mod, "_proxy_for", lambda source, exclude=frozenset(): (None, None))
+    if proxy_for is None:
+        monkeypatch.setattr(http_mod, "_proxy_for", lambda source, exclude=frozenset(): (None, None))
+    else:
+        monkeypatch.setattr(http_mod, "_proxy_for", proxy_for)
+
+
+def _pool_of(*nodes: str) -> tuple[ProxyPool, list[ProxyNode]]:
+    proxies = [ProxyNode(raw=raw) for raw in nodes]
+    return ProxyPool(proxies), proxies
+
+
+def _offline_pool(monkeypatch, session, pool: ProxyPool) -> None:
+    def proxy_for(source, exclude=frozenset()):
+        node = pool.acquire(exclude)
+        return node.as_requests_proxy(), node
+
+    monkeypatch.setattr(http_mod, "endpoint_limiter", lambda family: _NoLimit())
+    monkeypatch.setattr("tickhub_cn.proxy.pool.get_pool", lambda: pool)
+    _offline(monkeypatch, session, proxy_for=proxy_for)
 
 
 @pytest.mark.parametrize(
@@ -92,7 +194,8 @@ def test_paced_endpoint_fails_fast_so_the_tool_can_fall_back(monkeypatch):
     assert http_mod.ENDPOINT_BREAKER.open_families() == {}
 
 
-def test_first_reset_trips_breaker_without_retrying(monkeypatch):
+def test_reset_without_another_exit_trips_immediately(monkeypatch):
+    """No spare healthy node means no evidence, so the old fail-fast stands."""
     session = _ResetSession()
     _offline(monkeypatch, session)
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -108,6 +211,132 @@ def test_first_reset_trips_breaker_without_retrying(monkeypatch):
     assert second.value.code == "QFSD-7001"
     assert session.calls == 1
     assert second.value.detail["endpoint"] == "push2.eastmoney.com/api/qt/stock/get"
+
+
+def test_one_reset_fails_over_to_a_healthy_node_without_tripping(monkeypatch):
+    pool, (bad, good) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _NodeAwareSession({bad.requests_url()})
+    _offline_pool(monkeypatch, session, pool)
+
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    resp = http_mod.fetch("eastmoney", "GET", url, retries=2)
+
+    assert resp.status_code == 200
+    assert session.exits == [bad.requests_url(), good.requests_url()]
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
+    assert bad.failures == 1  # a reset implicates the exit that carried it
+
+
+def test_two_resets_from_two_exits_trip_for_600s(monkeypatch):
+    pool, (first, second) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _NodeAwareSession({first.requests_url(), second.requests_url()})
+    _offline_pool(monkeypatch, session, pool)
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", "https://push2.eastmoney.com/api/qt/stock/get", retries=2)
+
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["retry_after_s"] == 600
+    assert err.value.detail["error"] == "ConnectionResetError"
+    assert session.exits == [first.requests_url(), second.requests_url()]
+    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
+
+
+def test_resets_that_recovered_on_another_exit_never_trip_the_family(monkeypatch):
+    """Three reset-then-recover rounds are three bad exits, not an upstream ban.
+
+    A reset only implicates the node that carried it. Counting those recovered
+    resets toward a family trip would punish the upstream for a proxy fault, so
+    every round spends its one failover and answers 200 (QUOT-370 rework).
+    """
+    pool, _nodes = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _AlternatingSession()
+    _offline_pool(monkeypatch, session, pool)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+
+    for _ in range(3):
+        assert http_mod.fetch("eastmoney", "GET", url, retries=2).status_code == 200
+
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
+    assert len(session.exits) == 6  # each round resets once, then fails over
+
+
+def test_three_unrecovered_resets_across_calls_trip_the_family(monkeypatch):
+    """Condition 2: one reset per call, none recovered, 3 calls inside 60s."""
+    pool, (first, second) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _ResetThenServerErrorSession()
+    _offline_pool(monkeypatch, session, pool)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    family = http_mod.endpoint_family(url)
+
+    for _ in range(2):
+        with pytest.raises(TickHubError) as err:
+            http_mod.fetch("eastmoney", "GET", url, retries=1)
+        assert err.value.code == "QFSD-9003"  # the failover answered 500
+    assert http_mod.ENDPOINT_BREAKER.open_families() == {}
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 2
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", url, retries=1)
+
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["reason"] == "endpoint_breaker"
+    assert err.value.detail["retry_after_s"] == 600
+    assert err.value.detail["resets_in_window"] == 3
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 3
+    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
+    assert session.exits == [first.requests_url(), second.requests_url()] * 3
+
+
+def test_two_resets_in_one_call_count_as_one_window_event(monkeypatch):
+    """The second reset trips via condition 1; it must not stack condition 2."""
+    pool, (first, second) = _pool_of("http://127.0.0.1:9", "http://127.0.0.1:10")
+    session = _TwoResetsOneCallSession()
+    _offline_pool(monkeypatch, session, pool)
+    monkeypatch.setattr(http_mod.time, "sleep", lambda *_: None)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    family = http_mod.endpoint_family(url)
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", url, retries=2)
+
+    assert err.value.code == "QFSD-7001"
+    assert err.value.detail["reason"] == "endpoint_breaker"
+    assert http_mod.ENDPOINT_BREAKER.window_resets(family) == 1
+    assert http_mod.ENDPOINT_BREAKER.open_families() != {}
+    assert session.exits == [first.requests_url(), second.requests_url(), second.requests_url()]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (ConnectionResetError(10054, "远端主机强迫关闭了一个现有的连接。"), True),
+        (ConnectionAbortedError(10053, "你的主机中的软件中止了一个已建立的连接。"), True),
+        (requests.ConnectionError("Connection aborted.", ConnectionResetError(10054, "远端。")), True),
+        (requests.ConnectionError("Connection reset by peer"), True),
+        (requests.HTTPError("500 Server Error"), False),
+        (requests.Timeout("read timed out"), False),
+    ],
+)
+def test_localized_resets_are_classified_by_type_and_errno(exc, expected):
+    assert http_mod._is_connection_reset(exc) is expected
+
+
+def test_boxed_reset_keeps_the_socket_verdict_for_the_public_helper(monkeypatch):
+    class _LocalizedReset:
+        def request(self, *args, **kwargs):
+            raise requests.ConnectionError(
+                "Connection aborted.", ConnectionResetError(10054, "远端主机强迫关闭了一个现有的连接。")
+            )
+
+    _offline(monkeypatch, _LocalizedReset())
+
+    with pytest.raises(TickHubError) as err:
+        http_mod.fetch("eastmoney", "GET", "https://push2.eastmoney.com/api/qt/stock/get", retries=0)
+
+    assert err.value.detail["error"] == "ConnectionResetError"
+    assert err.value.detail["errno"] == 10054
+    assert http_mod.is_connection_reset(err.value) is True
 
 
 def test_breaker_is_scoped_to_one_endpoint_family(monkeypatch):
@@ -146,7 +375,9 @@ def probe_tool():
     def _probe(code: str = "X") -> dict:
         """Probe tool."""
         calls["n"] += 1
-        if calls["n"] > 1:
+        if calls.get("delay"):
+            time.sleep(calls["delay"])
+        if calls["n"] > calls.get("fail_from", 1):
             raise TickHubError("QFSD-7001", "blocked", detail={"retry_after_s": 600})
         return {"ok": True, "data": {"value": 1}, "meta": {"source": "probe"}}
 
@@ -180,3 +411,40 @@ def test_wrapper_raises_when_nothing_was_ever_cached(probe_tool):
     with pytest.raises(TickHubError) as err:
         fn(code="X")
     assert err.value.code == "QFSD-7001"
+
+
+def test_last_good_survives_a_process_restart(probe_tool):
+    """A fresh process has an empty _LAST_GOOD but the cache backend does not."""
+    fn, calls = probe_tool
+    first = fn(code="X")
+    assert first["data"] == {"value": 1}
+
+    with base_mod._LAST_GOOD_LOCK:
+        base_mod._LAST_GOOD.clear()  # simulate a newly started peer process
+
+    stale = fn(code="X", _refresh=True)
+    assert calls["n"] == 2
+    assert stale["data"] == {"value": 1}
+    assert stale["meta"]["degraded"] == "stale_cache"
+    assert stale["meta"]["last_good_source"] in {"redis", "memory"}
+    assert stale["meta"]["stale_age_s"] >= 0
+    assert stale["meta"]["retry_after_s"] == 600
+
+
+def test_public_refresh_control_bypasses_the_cache(probe_tool):
+    fn, calls = probe_tool
+    fn(code="X")
+    stale = fn(code="X", refresh=True)
+    assert calls["n"] == 2
+    assert stale["meta"]["stale"] is True
+
+
+def test_concurrent_identical_calls_share_one_upstream_producer(probe_tool):
+    from concurrent.futures import ThreadPoolExecutor
+
+    fn, calls = probe_tool
+    calls["delay"] = 0.2
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: fn(code="Y"), range(6)))
+    assert calls["n"] == 1
+    assert all(r["data"] == {"value": 1} for r in results)

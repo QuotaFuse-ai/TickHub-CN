@@ -96,8 +96,16 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
+        # tasklist writes the console OEM code page, not UTF-8: with PYTHONUTF8=1
+        # the default text mode would raise UnicodeDecodeError on a zh-CN host
+        # and leave stdout None.
         out = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, check=False
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="oem",
+            errors="replace",
+            check=False,
         ).stdout
         for line in out.splitlines():
             cols = line.split()

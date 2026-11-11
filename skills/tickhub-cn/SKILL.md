@@ -8,7 +8,7 @@ version: 1.1.0
 
 TickHub-CN is an MCP server, CLI and Python library that serves A-share data
 from exchanges, official disclosure sites and commercial aggregators. It
-exposes **125 canonical tools + 25 compatibility aliases = 150 MCP names** across
+exposes **126 canonical tools + 25 compatibility aliases = 151 MCP names** across
 14 layers. Responses are structured envelopes with provenance metadata.
 
 ## When to use

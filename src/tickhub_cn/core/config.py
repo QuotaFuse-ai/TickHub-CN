@@ -111,6 +111,15 @@ class Settings:
     proxy_pool_config_path: str = "logs/proxy_pool.json"
     proxy_pool_check_timeout: int = 10
     proxy_pool_check_interval: int = 60
+    # upstream exit provider: pool | commercial | direct (empty = derive from
+    # proxy_pool_enable, so older deployments keep working untouched)
+    proxy_provider: str = ""
+    proxy_pool_url: str = ""
+    proxy_commercial_url: str = ""
+    proxy_commercial_username: str = ""
+    proxy_commercial_password: str = ""
+    # commercial exits that authenticate by source IP instead of credentials
+    proxy_commercial_whitelist: str = ""
 
     # log db
     log_db_host: str = "127.0.0.1"
@@ -197,6 +206,12 @@ class Settings:
             proxy_pool_config_path=g("PROXY_POOL_CONFIG_PATH", "logs/proxy_pool.json"),
             proxy_pool_check_timeout=_int(g("PROXY_POOL_CHECK_TIMEOUT"), 10),
             proxy_pool_check_interval=_int(g("PROXY_POOL_CHECK_INTERVAL"), 60),
+            proxy_provider=g("PROXY_PROVIDER").lower(),
+            proxy_pool_url=g("PROXY_POOL_URL"),
+            proxy_commercial_url=g("PROXY_COMMERCIAL_URL"),
+            proxy_commercial_username=g("PROXY_COMMERCIAL_USERNAME"),
+            proxy_commercial_password=g("PROXY_COMMERCIAL_PASSWORD"),
+            proxy_commercial_whitelist=g("PROXY_COMMERCIAL_WHITELIST"),
             log_db_host=g("LOG_DB_HOST", "127.0.0.1"),
             log_db_port=g("LOG_DB_PORT"),
             log_db_user=g("LOG_DB_USER"),
