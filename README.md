@@ -21,6 +21,7 @@
   <br>
   <img src="https://img.shields.io/badge/layers-14-2ea44f.svg" alt="Layers">
   <img src="https://img.shields.io/badge/MCP%20tools-151-2ea44f.svg" alt="Tools">
+  <img src="https://img.shields.io/github/v/release/QuotaFuse-ai/TickHub-CN" alt="Release">
   <img src="https://img.shields.io/badge/auth-zero-success.svg" alt="Zero Auth">
 </p>
 
@@ -1135,6 +1136,18 @@ th-cn cache flush --prefix kline:600000   # 只清一个切片
 ---
 
 <a id="admin"></a>
+
+## 健康检查与版本
+
+MCP HTTP 端口（默认 8000）与管理台（8787）都提供 `/healthz`，返回同一形状——
+`version` 只从安装元数据读，跑的是哪一版一眼可见（QUOT-401）：
+
+```bash
+curl -s http://127.0.0.1:8000/healthz
+# {"status":"ok","service":"tickhub-cn","version":"1.1.0"}
+```
+
+未安装（直接跑源码树）时 `__version__` 为 `0.0.0+source`。
 
 ## 管理台（Admin Console）
 

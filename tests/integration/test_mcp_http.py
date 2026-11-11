@@ -72,3 +72,25 @@ def test_http_mcp_serves_the_same_catalogue(tmp_path: Path) -> None:
     assert starts, journal.bad_lines
     assert starts[0]["detail"]["transport"] == "http"
     assert starts[0]["detail"]["tools"] == 151
+
+
+def test_http_healthz_reports_service_and_version(tmp_path: Path) -> None:
+    """QUOT-401：/healthz 与 /mcp 同端口，回 status/service/version。"""
+    import urllib.request
+
+    from tickhub_cn import __version__
+
+    port = free_port()
+    proc = spawn(["mcp", "http", "--port", str(port)], cwd=tmp_path, LOG_LEVEL="warning")
+    try:
+        wait_port(port)
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=10) as reply:
+            body = json.loads(reply.read().decode("utf-8"))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    assert body == {"status": "ok", "service": "tickhub-cn", "version": __version__}
