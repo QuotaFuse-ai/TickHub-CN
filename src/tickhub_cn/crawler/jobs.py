@@ -22,7 +22,7 @@ from ..logging.setup import get_logger
 from ..risk.events import classify_announcement
 from ..validation.financial import crosscheck, normalize_report
 from . import event_publisher
-from .store import get_archive, item_key
+from .store import _announcement_event, get_archive, item_key
 
 # The four T-101 tasks keep their nightly ``all`` round. T-102 market collectors
 # are registered alongside them but run on their own crons, so ``all`` stays the
@@ -230,6 +230,21 @@ def crawl_announcements(
                     progress({"task": "announcements", "code": code, "fetched": 0, "inserted": 0, "failed": True})
                 continue
             result.fetched += len(rows)
+            # 正文是可选步骤：开了开关才对每条公告拉 PDF 抽文本（有外链下载成本）。
+            # 抓不到就退回标题，不会让这次采集失败。
+            if settings.announcement_text_enable and rows:
+                from .announcement_text import attach_texts
+
+                filled = attach_texts(rows, max_chars=settings.announcement_text_max_chars)
+                if progress:
+                    progress(
+                        {
+                            "task": "announcements",
+                            "code": code,
+                            "text_filled": filled,
+                            "text_missing": max(0, len(rows) - filled),
+                        }
+                    )
             fresh = [r for r in rows if cache.dedupe(source, item_key(source, r, code, r.get("title"), r.get("publish_time")), DEDUPE_TTL)]
             result.skipped += len(rows) - len(fresh)
             inserted = archive.insert_announcements(rows, source=source)
@@ -260,6 +275,72 @@ def crawl_announcements(
         result.status = "cancelled"
     elif result.failed:
         result.status = "partial" if result.inserted or result.fetched else "failed"
+    return result
+
+
+def republish_announcements(
+    codes: Iterable[str],
+    *,
+    limit: int = 500,
+    with_text: bool = True,
+    progress: Progress | None = None,
+) -> TaskResult:
+    """把归档里已有的公告按当前契约重发一遍事件（用于补正文 / 修历史事件）。
+
+    只做一件事：读归档 → （可选）抽 PDF 正文 → 按同一 ``event_id`` 再发一次。
+    ``event_id`` 是业务事实的哈希、不随正文变化，所以重发是幂等的；消费端
+    决定是否用「正文更全」的版本覆盖，而不是新增一条公告。
+
+    不写任何新数据到 SQLite 归档，也不改 crawl_time——它是一个补数动作。
+    """
+    settings = get_settings()
+    archive = get_archive()
+    result = TaskResult(task="announcements")
+    published = 0
+    text_filled = 0
+
+    for code in list(codes):
+        rows = archive.announcements(code=code, limit=limit)
+        result.fetched += len(rows)
+        if with_text and rows:
+            from .announcement_text import attach_texts
+
+            text_filled += attach_texts(rows, max_chars=settings.announcement_text_max_chars)
+        for row in rows:
+            item_id = str(row.get("item_id") or "")
+            if not item_id:
+                continue
+            try:
+                event_publisher.publish(
+                    _announcement_event(
+                        str(row.get("source") or "cninfo"),
+                        item_id,
+                        row,
+                        code=str(row.get("code") or code),
+                        title=str(row.get("title") or ""),
+                        published=str(row.get("publish_time") or ""),
+                        url=row.get("url"),
+                    )
+                )
+                published += 1
+            except Exception as exc:  # publishing is a side path
+                result.failed.append(code)
+                result.errors[code] = str(exc)[:300]
+        if progress:
+            progress(
+                {
+                    "task": "announcements",
+                    "code": code,
+                    "rows": len(rows),
+                    "published": published,
+                    "text_filled": text_filled,
+                }
+            )
+
+    event_publisher.wait_idle()
+    result.inserted = published
+    result.detail["published"] = published
+    result.detail["text_filled"] = text_filled
     return result
 
 

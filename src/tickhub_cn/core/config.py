@@ -86,6 +86,10 @@ class Settings:
     offline_crawler_northbound_cron: str = "5 15 * * 1-5"
     offline_crawler_concurrency: int = 2
     offline_crawler_watchlist: str = ""
+    # 公告正文：从 PDF 抽文本进事件（默认关，开了每条公告约 1 次外链下载）。
+    # 关着时事件里的 clean_content 就是标题，检索粒度也只能是标题级。
+    announcement_text_enable: bool = False
+    announcement_text_max_chars: int = 12000
     offline_crawler_max_codes: int = 50
     offline_crawler_run_on_start: bool = False
     # T-102 market collectors own crons so a slow financial sweep never queues
@@ -189,6 +193,8 @@ class Settings:
             offline_crawler_northbound_cron=g("OFFLINE_CRAWLER_NORTHBOUND_CRON", "5 15 * * 1-5"),
             offline_crawler_concurrency=_int(g("OFFLINE_CRAWLER_CONCURRENCY"), 2),
             offline_crawler_watchlist=g("OFFLINE_CRAWLER_WATCHLIST"),
+            announcement_text_enable=_bool(g("ANNOUNCEMENT_TEXT_ENABLE"), False),
+            announcement_text_max_chars=_int(g("ANNOUNCEMENT_TEXT_MAX_CHARS"), 12000),
             offline_crawler_max_codes=_int(g("OFFLINE_CRAWLER_MAX_CODES"), 50),
             offline_crawler_run_on_start=_bool(g("OFFLINE_CRAWLER_RUN_ON_START"), False),
             offline_crawler_financials_cron=g("OFFLINE_CRAWLER_FINANCIALS_CRON", "0 18 * * 6"),
