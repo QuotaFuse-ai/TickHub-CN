@@ -319,6 +319,10 @@ def _announcement_event(
     source: str, item_id: str, row: dict[str, Any], *, code: str, title: str, published: str, url: Any
 ) -> dict[str, Any]:
     ann_type = str(row.get("type") or row.get("announcementTypeName") or "")
+    # 正文优先：抓过 PDF 就用正文，没抓（或抽不出字）才退回标题。
+    # 消费端（FinanceCoffer）按 clean_content 切片与向量化，标题级还是正文级
+    # 由这里决定，不额外传标记——正文本身的长短就是判据。
+    body = str(row.get("_text") or "").strip()
     fields: dict[str, Any] = {"ann_type": ann_type, "publish_date": _business_date(published)}
     if title:
         fields["title"] = title
@@ -330,7 +334,7 @@ def _announcement_event(
         biz_key=item_id,
         event_time=_business_time(published),
         content={
-            "clean_content": title,
+            "clean_content": body or title,
             "structured_fields": fields,
             "quality_metrics": {"confidence": "high", "quality_status": "normal"},
         },
@@ -668,7 +672,11 @@ class Archive:
                     "INSERT OR IGNORE INTO announcement"
                     " (item_id, code, title, publish_time, url, source, crawl_time, payload)"
                     " VALUES (?,?,?,?,?,?,?,?)",
-                    (item_id, code, title, published, url, source, stamp, json.dumps(row, ensure_ascii=False, default=str)),
+                    (item_id, code, title, published, url, source, stamp, json.dumps(
+                        {k: v for k, v in row.items() if not k.startswith("_")},
+                        ensure_ascii=False,
+                        default=str,
+                    )),
                 )
                 if not cur.rowcount:
                     continue
