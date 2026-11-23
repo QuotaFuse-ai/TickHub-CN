@@ -275,7 +275,10 @@ def start_all_cmd(
     restart_limit: int = typer.Option(3, "--restart-limit", help="Child restarts allowed inside a 5 minute window."),
 ) -> None:
     """Run the MCP HTTP server and the crawler child as one supervised unit."""
+    from ..runtime_card import announce
     from .start_all import start_all
+
+    announce("tickhub", mcp=port, product="TickHub-CN")
 
     raise typer.Exit(
         start_all(host=host, port=port, task=task, crawler=crawler, restart_limit=restart_limit)
@@ -1111,6 +1114,11 @@ def mcp_http(
 ) -> None:
     """Serve MCP over Streamable HTTP (default 127.0.0.1:8000/mcp)."""
     from ..mcp.server import run_http
+    from ..runtime_card import announce
+
+    # 先把真实端口登记给 LadderStock（自述卡），再开始监听：面板按卡找地址，
+    # 不再按「基础端口 + 偏移」推算（一台机器只有一份共用实例时推算必然敲空门）。
+    announce("tickhub", mcp=port, product="TickHub-CN")
 
     try:
         run_http(host=host, port=port, path=path)
@@ -1136,6 +1144,10 @@ def admin_serve(
 ) -> None:
     """Run the admin console in its own process."""
     from ..admin_api.app import serve
+    from ..runtime_card import announce
+
+    # 管理端是同一个模块的 Web 面：登记到一个卡片里（与 MCP 面合并，不互相覆盖）。
+    announce("tickhub", web=port or 8787, product="TickHub-CN")
 
     raise typer.Exit(serve(host, port, force=force))
 
